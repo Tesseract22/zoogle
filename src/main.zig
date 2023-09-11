@@ -45,6 +45,17 @@ fn PrintFn(tree: Ast, fnProto: Ast.full.FnProto) !void {
     _ = try stdout.write("\n");
 }
 
+fn FormatFn(allocator: std.mem.Allocator, tree: Ast, node: Ast.Node.Index) ![]u8 {
+    
+
+    const first = tree.tokens.items(.start)[tree.firstToken(node)];
+    const last = tree.tokens.items(.start)[tree.lastToken(node) + 1];
+    var slice = try allocator.alloc(u8, last - first + 1);
+    std.log.debug("len: {} {}", .{slice.len, tree.source[first..last + 1].len});
+    @memcpy(slice, tree.source[first..last + 1]);
+    return slice;
+}
+
 fn ExactMatchType(a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) bool {
     const a_first = a_tree.firstToken(a);
     const a_last = a_tree.lastToken(a);
@@ -159,12 +170,66 @@ const ParseError = error {
     ExpectFileArgument,
     ExpectMatchArgument,
     InvalidMatchSyntax,
+    InvalidArgumentOption,
 };
 
+const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
+const FnResult = struct {
+    fnString: []const u8,
+    distance: u32,
+    const self = @This();
+    pub fn compare(ctx: ?*anyopaque, a: *self, b: *self) std.math.Order {
+        _ = ctx;
+        return std.math.order(a.distance, b.distance);
+    }
+};
+const File = std.fs.File;
+const Dir = std.fs.Dir;
+
+fn OpenDirOfFile(file_path: []const u8, cwd: Dir) !Dir {
+    const last_slash_index = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return cwd; // windows compatiblity?
+    return cwd.openDir(file_path[0..last_slash_index], .{});
+}
+
+fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, cwd: Dir, depth: u32) !void {
+    const file_size = (file.stat() catch |e| {
+        std.log.err("Cannot get file size", .{});
+        return e;
+    }).size;
+    const source = allocator.allocSentinel(u8, file_size, 0) catch |e| {
+        std.log.err("failed to allocate {} bytes to read file\n", .{file_size});
+        return e;
+    };
+    defer allocator.free(source);
+    _ = try file.readAll(source);
+    var ast = try Ast.parse(allocator, source, .zig);
+    defer ast.deinit(allocator);
+
+    for (ast.rootDecls()) |d| {
+        var buffer: [1]Ast.Node.Index = undefined;
+        var fn_proto = ast.fullFnProto(&buffer, d) orelse  {
+            var var_proto = ast.fullVarDecl(d) orelse continue;
+            std.log.debug("{}", .{var_proto});
+            continue;
+        };
+        // if (!ExactMatchfn(&ast,& match_ast, fnProto, match_fn)) continue;
+        const distance = FuzzyMatchFn(allocator, &ast, match_ast, fn_proto, match_fn);
+        std.log.debug("fn {s}() distance: {}", .{tokenRender(ast, fn_proto.name_token), distance});
+        if (distance > dist_limit) continue;
+        const fn_result = try allocator.create(FnResult);
+        fn_result.* = .{.fnString = try FormatFn(allocator, ast, d), .distance = distance};
+        try queue.add(fn_result);
+    }
+
+    _ = cwd;
+    _ = depth;
+}
+
+const dist_limit = 20;
+var recursive_depth: u32 = 1;
 
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -177,95 +242,75 @@ pub fn main() !void {
     if (args.len <= 2) {
         return error.ExpectMatchArgument;
     }
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
 
+    if (args.len >= 4) {
+        if (!std.mem.eql(u8, args[3], "-r")) return error.InvalidArgumentOption;
+        if (args.len >= 5) {
+            recursive_depth = std.fmt.parseInt(u32, args[4], 10) catch |e| {
+                std.log.err("Failed to parse options after \"-r\", expect u32, got \"{s}\"", .{args[4]});
+                return e;
+            };
+        }
+    } 
     
     const file_name = args[1];
     const match_string = args[2];
+
     var match_ast = try Ast.parse(allocator, match_string, .zig);
     defer match_ast.deinit(allocator);
     // debugAst(match_ast);
+    var match_fn_node: [1]Ast.Node.Index = undefined;
     const match_fn = eval_fn: {
-        var buffer: [1]Ast.Node.Index = undefined;
+        
         
         break :eval_fn for (match_ast.nodes.items(.tag), 0..) |t, i| {
             _ = t;
-            break match_ast.fullFnProto(&buffer, @intCast(i)) orelse continue;
+            match_fn_node[0] = @intCast(i);
+            break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
         } else return error.InvalidMatchSyntax;
     };
     // try stdout.print("input: {s}\n", .{match_string});
+    std.log.debug("fn node: {}", .{match_fn_node[0]});
     try PrintFn(match_ast, match_fn);
-
-    var file = std.fs.cwd().openFile(file_name, .{.mode = .read_only}) catch |e| {
-        std.log.err("Cannot open file: {s}", .{file_name});
-        return e;
+    var cwd: Dir = std.fs.cwd();
+    var file = find_file: {
+        if (std.mem.eql(u8, file_name, "std")) {
+            const env_paths = std.os.getenv("PATH") orelse unreachable;
+            var iterator = std.mem.splitScalar(u8, env_paths, ':');
+            while (iterator.next()) |env_path| {
+                var temp_dir = std.fs.openDirAbsolute(env_path, .{}) catch continue;
+                defer temp_dir.close();
+                const std_zig = temp_dir.openFile("lib/std/std.zig", .{.mode = .read_only}) catch continue;
+                cwd = temp_dir.openDir("lib/std", .{}) catch unreachable;
+                break :find_file std_zig;
+            }
+        }
+        cwd = OpenDirOfFile(file_name, cwd) catch |e| {
+            std.log.err("Cannot open the Directory where the file \"{s}\" is located", .{file_name});
+            return e;
+        };
+        break: find_file std.fs.cwd().openFile(file_name, .{.mode = .read_only}) catch |e| {
+            std.log.err("Cannot open file: {s}", .{file_name});
+            return e;
+        };
     };
+    var fn_queue = FnQueue.init(allocator, null); 
+    defer fn_queue.deinit();
+    try SearchFile(allocator, file, &fn_queue, &match_ast, match_fn, cwd, recursive_depth);
+
     try stdout.print("opening {s}\n", .{file_name});
     defer file.close();
 
-    const file_size = (file.stat() catch |e| {
-        std.log.err("Cannot get file size", .{});
-        return e;
-    }).size;
-    const source = allocator.allocSentinel(u8, file_size, 0) catch |e| {
-        std.log.err("failed to allocate {} bytes to read file\n", .{file_size});
-        return e;
-    };
-    defer allocator.free(source);
-    _ = try file.readAll(source);
-    try bw.flush();
-
-
-    var ast = try Ast.parse(allocator, source, .zig);
-    defer ast.deinit(allocator);
-    const token_starts = ast.tokens.items(.start);
-    const decls = ast.rootDecls();
-    const dist_limit = 20;
-    const FnResult = struct {
-        fnNode: Ast.Node.Index,
-        distance: u32,
-        const self = @This();
-        pub fn compare(ctx: ?*anyopaque, a: *self, b: *self) std.math.Order {
-            _ = ctx;
-            return std.math.order(a.distance, b.distance);
-        }
-    };
-    const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
-    var fn_queue = FnQueue.init(allocator, null);
-    defer fn_queue.deinit();
-    for (decls) |d| {
-
-
-        
-        var buffer: [1]Ast.Node.Index = undefined;
-        var fnProto = ast.fullFnProto(&buffer, d) orelse continue;
-        // if (!ExactMatchfn(&ast,& match_ast, fnProto, match_fn)) continue;
-        const distance = FuzzyMatchFn(allocator, &ast, &match_ast, fnProto, match_fn);
-        std.log.debug("fn {s}() distance: {}", .{tokenRender(ast, fnProto.name_token), distance});
-        if (distance > dist_limit) continue;
-        const fn_result = try allocator.create(FnResult);
-        fn_result.* = .{.fnNode = d, .distance = distance};
-        try fn_queue.add(fn_result);
-    }
-    var buffer: [1]Ast.Node.Index = undefined;
+    
+    // var buffer: [1]Ast.Node.Index = undefined;
     try stdout.print("Find {} candidates\n", .{fn_queue.count()});
     while (fn_queue.removeOrNull()) |fr| {
-        var fn_proto = ast.fullFnProto(&buffer, fr.fnNode) orelse unreachable;
-        const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
-        var location_buff: [128]u8 = undefined;
-        @memset(&location_buff, 0);
-        _ = try std.fmt.bufPrint(&location_buff, "{s}:{}:{} ", .{file_name, location.line, location.column});
-        try stdout.print("{s}", .{location_buff});
-        try PrintFn(ast, fn_proto);
-        allocator.destroy(fr);
+        try stdout.print("{s}\n", .{fr.fnString});
+        allocator.free(fr.fnString);
     }
     
     // _ = token_tags;
-    _ = token_starts;
     try bw.flush();
-    // debugAst(ast);
     // debugAst(match_ast);
 
 }
