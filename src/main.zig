@@ -139,27 +139,33 @@ fn FuzzyMatchFn(
                 a: Ast.full.FnProto, b: Ast.full.FnProto) 
                 u32 {
     var dist: u32 = 0;
-    dist += (LevenshteinDistance(allocator, 
-                                tokenRender(a_tree.*, a.name_token), 
-                                tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
+    if (a.name_token != null and b.name_token != null) {
+        dist += (LevenshteinDistance(allocator, 
+                                    tokenRender(a_tree.*, a.name_token), 
+                                    tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
+    }
+
     dist += FuzzyMatchType(allocator, a_tree, b_tree, a.ast.return_type, b.ast.return_type);
+    // std.log.debug("return dist: {}", .{dist});
     var ai = a.iterate(a_tree);
     var bi = b.iterate(b_tree);
     while (true) {
+
         const ap = ai.next();
         const bp = bi.next();
         if (ap == null and bp == null) {
             break;
         } else if (ap == null) {
-            dist += FuzzyCostType(b_tree.*, bp.?.type_expr);
+            dist += FuzzyCostType(b_tree.*, bp.?.type_expr) * 2;
         } else if (bp == null ){
-            dist += FuzzyCostType(a_tree.*, ap.?.type_expr);
+            dist += FuzzyCostType(a_tree.*, ap.?.type_expr) * 2;
         } else {
             const a_name = tokenRender(a_tree.*, ap.?.name_token);
             const b_name = tokenRender(b_tree.*, bp.?.name_token);
             dist += (LevenshteinDistance(allocator, a_name, b_name) catch return std.math.maxInt(u32));
             dist += FuzzyMatchType(allocator, a_tree, b_tree, ap.?.type_expr, bp.?.type_expr);
         }
+        // std.log.debug("param dist: {}", .{dist});
 
     }
     return dist;
@@ -196,6 +202,12 @@ fn GetDirOfPath(file_path: []const u8) []const u8 {
     return file_path[0..last_slash_index];
 }
 
+fn PrintUsage() void {
+    std.debug.print("zoogle $path_to_file $search_string [-r $recursive_depth]\n", .{});
+    std.debug.print("{s: >8} path_to_file = {{\"std\" | relative_path}}\n", .{"where"});
+    std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name]: $var_type, ...) $var_type\"\n", .{"where"});
+}
+
 
 fn SearchFile(
     allocator: std.mem.Allocator, 
@@ -222,7 +234,7 @@ fn SearchFile(
         var buffer: [1]Ast.Node.Index = undefined;
         var fn_proto = ast.fullFnProto(&buffer, d) orelse continue;
         const distance = FuzzyMatchFn(allocator, &ast, match_ast, fn_proto, match_fn);
-        // std.log.debug("fn {s}() distance: {}", .{tokenRender(ast, fn_proto.name_token), distance});
+        std.log.debug("fn {s}() distance: {}", .{tokenRender(ast, fn_proto.name_token), distance});
         if (distance > dist_limit) continue;
         const fn_result = try allocator.create(FnResult);
         const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
@@ -285,11 +297,12 @@ fn SearchFile(
     }
 }
 
-const dist_limit = 15;
+const dist_limit = 20;
 var recursive_depth: u32 = 1;
 
 
 pub fn main() !void {
+    errdefer PrintUsage();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
