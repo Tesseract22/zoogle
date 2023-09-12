@@ -114,7 +114,12 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     const a_type = a_tree.tokens.items(.tag)[a_tree.firstToken(a)..a_tree.lastToken(a)];
     const b_type = b_tree.tokens.items(.tag)[b_tree.firstToken(b)..b_tree.lastToken(b)];
     var d = LevenshteinDistanceOptions(TokenTag)(allocator, a_type, b_type, .{ .eql = EqlTag }) catch return std.math.maxInt(u32);
-    d += LevenshteinDistance(allocator, tokenRender(a_tree.*, a_tree.lastToken(a)), tokenRender(b_tree.*, b_tree.lastToken(b))) catch return std.math.maxInt(u32);
+    const a_param_name = tokenRender(a_tree.*, a_tree.lastToken(a));
+    const b_param_name = tokenRender(b_tree.*, b_tree.lastToken(b));
+    d += LevenshteinDistance(
+        allocator,
+        a_param_name,
+        b_param_name) catch return std.math.maxInt(u32);
     return d;
 }
 
@@ -132,7 +137,6 @@ fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast
     if (a.name_token != null and b.name_token != null) {
         dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
     }
-
     dist += FuzzyMatchType(allocator, a_tree, b_tree, a.ast.return_type, b.ast.return_type);
     // std.log.debug("return dist: {}", .{dist});
     var ai = a.iterate(a_tree);
@@ -170,7 +174,11 @@ const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
 const FnResult = struct {
     fnString: []const u8,
     distance: u32,
-    location: []const u8,
+    location: struct {
+        file: []const u8,
+        line: usize,
+        column: usize,
+    },
     const self = @This();
     pub fn compare(ctx: ?*anyopaque, a: *self, b: *self) std.math.Order {
         _ = ctx;
@@ -216,8 +224,10 @@ fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_a
         if (distance > dist_limit) continue;
         const fn_result = try allocator.create(FnResult);
         const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
-        const location_str = std.fmt.allocPrint(allocator, "{s}:{}:{}", .{ dir.buffer[0..dir.end_index], location.line, location.column });
-        fn_result.* = .{ .fnString = try FormatFn(allocator, ast, fn_proto), .distance = distance, .location = try location_str };
+        fn_result.* = .{ 
+            .fnString = try FormatFn(allocator, ast, fn_proto), 
+            .distance = distance, 
+            .location = .{ .file = try RelativePathFromCwd(allocator, dir.buffer[0..dir.end_index]), .line = location.line, .column = location.column } };
         try queue.add(fn_result);
     }
     if (depth == 1) return;
@@ -237,8 +247,8 @@ fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_a
                     const arg = ast.nodes.items(.data)[i];
                     const file_name_quote = tokenRender(ast, ast.nodes.items(.main_token)[arg.lhs]);
                     const file_name = file_name_quote[1 .. file_name_quote.len - 1];
-                    // std.log.debug("@import({s})", .{file_name});
-                    if (std.mem.eql(u8, file_name, "root") or std.mem.eql(u8, file_name, "std") or std.mem.eql(u8, file_name, "builtin")) continue;
+                    std.log.debug("@import({s})", .{file_name_quote});
+                    if (!std.mem.endsWith(u8, file_name, ".zig")) continue;
 
                     var next_file = try cwd.openFile(file_name, .{ .mode = .read_only });
                     defer next_file.close();
@@ -261,7 +271,50 @@ fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_a
     }
 }
 
-const dist_limit = 20;
+fn RelativePathFromCwd(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    // path: "/abc/123/"
+    // cwd:  "/abc/1234/xyz/"
+    // ../../123
+
+    // path: "/abc/1234/xyz/"
+    // cwd:  "/abc/123/"
+    // ../1234/xyz
+
+    // path: "/abc/123/xyz/"
+    // cwd:  "/abc/123/"
+    // xyz
+    assert(path[0] == '/');
+    const abs_cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(abs_cwd);
+    var prev_slash_i: u32 = 0;
+    const min_len = @min(path.len, abs_cwd.len);
+
+    for (path[0..min_len], abs_cwd[0..min_len], 0..) |ac, bc, i| {
+        if (ac != bc) {
+            break;
+        } else if (ac == '/') {
+            prev_slash_i = @intCast(i);
+        }
+    }
+    var slash_count: u32 = 0;
+    var slash_count_until_stop: u32 = 0;
+    for (abs_cwd, 0..) |c, i| {
+        if (c == '/') {
+            slash_count += 1;
+            if (i <= prev_slash_i) slash_count_until_stop += 1;
+        }
+    }
+    var step_backward: u32 = slash_count - slash_count_until_stop;
+    if (abs_cwd[abs_cwd.len - 1] != '/') step_backward += 1;
+    var buf = try allocator.alloc(u8, step_backward * 3 + path.len - prev_slash_i - 1);
+    for (0..step_backward) |i| {
+        _ = try std.fmt.bufPrint(buf[i * 3 ..], "../", .{});
+    }
+    _ = try std.fmt.bufPrint(buf[step_backward * 3 ..], "{s}", .{path[prev_slash_i + 1 ..]});
+    return buf;
+}
+
+var dist_limit: u32 = 20;
 var recursive_depth: u32 = 1;
 
 pub fn main() !void {
@@ -303,6 +356,15 @@ pub fn main() !void {
             break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
         } else return error.InvalidMatchSyntax;
     };
+    if (match_fn.name_token) |nt| {
+        dist_limit += @intCast(tokenRender(match_ast, nt).len);
+    }
+    var match_param_it = match_fn.iterate(&match_ast);
+    while (match_param_it.next()) |p| {
+        if (p.name_token) |nt| {
+            dist_limit += @intCast(tokenRender(match_ast, nt).len);
+        }
+    }
     // try stdout.print("input: {s}\n", .{match_string});
     std.log.debug("fn node: {}", .{match_fn_node[0]});
     try PrintFn(match_ast, match_fn);
@@ -347,9 +409,13 @@ pub fn main() !void {
     // var buffer: [1]Ast.Node.Index = undefined;
     try stdout.print("Find {} candidates\n", .{fn_queue.count()});
     while (fn_queue.removeOrNull()) |fr| {
-        try stdout.print("{s}{s}{s} {s}{s}{s}\n", .{ Color.KGRN, fr.location, Color.KRST, Color.KCYN, fr.fnString, Color.KRST });
+        try stdout.print("{s}{s}:{}:{}{s} {s}{s}{s}\n", 
+        .{ 
+            Color.KYEL, fr.location.file, fr.location.line, fr.location.column, Color.KRST, 
+            Color.KCYN, fr.fnString, Color.KRST });
+        // const rel_path = RelativePathFromCwd(allocator, fr.)
         allocator.free(fr.fnString);
-        allocator.free(fr.location);
+        allocator.free(fr.location.file);
         allocator.destroy(fr);
     }
 
