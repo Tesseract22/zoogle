@@ -203,6 +203,11 @@ fn PrintUsage() void {
     std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name]: $var_type, ...) $var_type\"\n", .{"where"});
 }
 
+
+fn FindStdPackages(allocator: std.mem.Allocator) void {
+    allocator.
+}
+
 fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, dir: *std.heap.FixedBufferAllocator, file_set: *FileSet, depth: u32) !void {
     const file_size = (file.stat() catch |e| {
         std.log.err("Cannot get file size", .{});
