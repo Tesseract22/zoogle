@@ -116,10 +116,7 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     var d = LevenshteinDistanceOptions(TokenTag)(allocator, a_type, b_type, .{ .eql = EqlTag }) catch return std.math.maxInt(u32);
     const a_param_name = tokenRender(a_tree.*, a_tree.lastToken(a));
     const b_param_name = tokenRender(b_tree.*, b_tree.lastToken(b));
-    d += LevenshteinDistance(
-        allocator,
-        a_param_name,
-        b_param_name) catch return std.math.maxInt(u32);
+    d += LevenshteinDistance(allocator, a_param_name, b_param_name) catch return std.math.maxInt(u32);
     return d;
 }
 
@@ -168,6 +165,7 @@ const ParseError = error{
     ExpectMatchArgument,
     InvalidMatchSyntax,
     InvalidArgumentOption,
+    PacakageNotFound,
 };
 
 const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
@@ -203,11 +201,6 @@ fn PrintUsage() void {
     std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name]: $var_type, ...) $var_type\"\n", .{"where"});
 }
 
-
-fn FindStdPackages(allocator: std.mem.Allocator) void {
-    allocator.
-}
-
 fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, dir: *std.heap.FixedBufferAllocator, file_set: *FileSet, depth: u32) !void {
     const file_size = (file.stat() catch |e| {
         std.log.err("Cannot get file size", .{});
@@ -229,10 +222,7 @@ fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_a
         if (distance > dist_limit) continue;
         const fn_result = try allocator.create(FnResult);
         const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
-        fn_result.* = .{ 
-            .fnString = try FormatFn(allocator, ast, fn_proto), 
-            .distance = distance, 
-            .location = .{ .file = try RelativePathFromCwd(allocator, dir.buffer[0..dir.end_index]), .line = location.line, .column = location.column } };
+        fn_result.* = .{ .fnString = try FormatFn(allocator, ast, fn_proto), .distance = distance, .location = .{ .file = try RelativePathFromCwd(allocator, dir.buffer[0..dir.end_index]), .line = location.line, .column = location.column } };
         try queue.add(fn_result);
     }
     if (depth == 1) return;
@@ -276,6 +266,28 @@ fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_a
     }
 }
 
+fn StdLibrary(lib: []const u8) ![]const u8 {
+    if (std.mem.eql(u8, lib, "std")) {
+        return "lib/std/std.zig";
+    } else if (std.mem.eql(u8, lib, "builtin")) {
+        return "lib/std/builtin.zig";
+    }
+    return error.PacakageNotFound;
+}
+
+fn FindFromSysPath(allocator: std.mem.Allocator, file_name: []const u8) ![]const u8 {
+    const env_paths = std.os.getenv("PATH") orelse return error.PacakageNotFound;
+    var iterator = std.mem.splitScalar(u8, env_paths, ':');
+    while (iterator.next()) |env_path| {
+        std.log.debug("finding in {s}/{s}", .{ env_path, file_name });
+        var temp_dir = std.fs.openDirAbsolute(env_path, .{}) catch continue;
+        defer temp_dir.close();
+        const package = temp_dir.openFile(file_name, .{ .mode = .read_only }) catch continue;
+        defer package.close();
+        return try temp_dir.realpathAlloc(allocator, file_name);
+    }
+    return error.PacakageNotFound;
+}
 fn RelativePathFromCwd(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     // path: "/abc/123/"
     // cwd:  "/abc/1234/xyz/"
@@ -378,26 +390,13 @@ pub fn main() !void {
 
     var file_set = FileSet.init(allocator);
     defer file_set.deinit();
-    var file = find_file: {
-        if (std.mem.eql(u8, file_name, "std")) {
-            const env_paths = std.os.getenv("PATH") orelse unreachable;
-            var iterator = std.mem.splitScalar(u8, env_paths, ':');
-            while (iterator.next()) |env_path| {
-                var temp_dir = std.fs.openDirAbsolute(env_path, .{}) catch continue;
-                defer temp_dir.close();
-                const std_zig = temp_dir.openFile("lib/std/std.zig", .{ .mode = .read_only }) catch continue;
-                _ = temp_dir.realpathAlloc(path_fba.allocator(), "lib/std/std.zig") catch unreachable;
-                break :find_file std_zig;
-            }
+    var file = try find_file: {
+        if (!std.mem.endsWith(u8, file_name, ".zig")) {
+            const package_abs_path = try FindFromSysPath(path_fba.allocator(), try StdLibrary(file_name));
+            break :find_file std.fs.openFileAbsolute(package_abs_path, .{ .mode = .read_only });
         }
-        _ = std.fs.cwd().realpathAlloc(path_fba.allocator(), file_name) catch |e| {
-            std.log.err("Cannot allocate memoery for the abs path where \"{s}\" is located", .{file_name});
-            return e;
-        };
-        break :find_file std.fs.cwd().openFile(file_name, .{ .mode = .read_only }) catch |e| {
-            std.log.err("Cannot open file: {s}", .{file_name});
-            return e;
-        };
+        _ = try std.fs.cwd().realpathAlloc(path_fba.allocator(), file_name);
+        break :find_file try std.fs.cwd().openFile(file_name, .{ .mode = .read_only });
     };
     try stdout.print("current path: {s}\n", .{path_buffer});
     try bw.flush();
@@ -414,10 +413,7 @@ pub fn main() !void {
     // var buffer: [1]Ast.Node.Index = undefined;
     try stdout.print("Find {} candidates\n", .{fn_queue.count()});
     while (fn_queue.removeOrNull()) |fr| {
-        try stdout.print("{s}{s}:{}:{}{s} {s}{s}{s}\n", 
-        .{ 
-            Color.KYEL, fr.location.file, fr.location.line, fr.location.column, Color.KRST, 
-            Color.KCYN, fr.fnString, Color.KRST });
+        try stdout.print("{s}{s}:{}:{}{s} {s}{s}{s}\n", .{ Color.KYEL, fr.location.file, fr.location.line, fr.location.column, Color.KRST, Color.KCYN, fr.fnString, Color.KRST });
         // const rel_path = RelativePathFromCwd(allocator, fr.)
         allocator.free(fr.fnString);
         allocator.free(fr.location.file);

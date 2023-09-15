@@ -1,6 +1,5 @@
 const std = @import("std");
 
-
 pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) !u32 {
     const m = s.len;
     const n = t.len;
@@ -31,21 +30,19 @@ pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []con
         // swap
     }
     return v0[n];
-
 }
-pub fn DistanceOptions(comptime T: type) type  {
+pub fn DistanceOptions(comptime T: type) type {
     return struct {
         deletion: u32 = 1,
         insertion: u32 = 1,
         substitution: u32 = 1,
-        eql: fn(?*anyopaque, T, T) bool,
+        eql: fn (?*anyopaque, T, T) bool,
         ctx: ?*anyopaque = null,
     };
 }
 
 const Error = std.mem.Allocator.Error;
 pub fn LevenshteinDistanceOptions(comptime T: type) (fn (std.mem.Allocator, []const T, []const T, DistanceOptions(T)) Error!u32) {
-    
     return struct {
         pub fn f(allocator: std.mem.Allocator, s: []const T, t: []const T, comptime options: DistanceOptions(T)) Error!u32 {
             const m = s.len;
@@ -78,17 +75,14 @@ pub fn LevenshteinDistanceOptions(comptime T: type) (fn (std.mem.Allocator, []co
             }
             return v0[n];
         }
-    }.f; 
+    }.f;
 }
 
 fn TestDistance(s: []const u8, t: []const u8, expect: u32) !void {
     const d = try LevenshteinDistance(std.testing.allocator, s, t);
-    std.debug.print("({s: <15} => {s: >15}) => ({: <2} <=> {: >2})\n", .{s, t, expect, d});
+    std.debug.print("({s: <15} => {s: >15}) => ({: <2} <=> {: >2})\n", .{ s, t, expect, d });
     try std.testing.expect(d == expect);
-    
 }
-
-
 
 test "distance" {
     std.debug.print("\n", .{});
@@ -104,6 +98,6 @@ fn u8Eql(a: u8, b: u8) bool {
 }
 
 test "distance options" {
-    const d = try LevenshteinDistanceOptions(u8)(std.testing.allocator, "hello", "hllo", .{.eql=u8Eql});
+    const d = try LevenshteinDistanceOptions(u8)(std.testing.allocator, "hello", "hllo", .{ .eql = u8Eql });
     std.debug.print("distance: {}\n", .{d});
 }
