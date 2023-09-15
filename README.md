@@ -49,7 +49,7 @@ clone and `zig build`, then run `./zig-out/bin/zoogle` to see help.
 
 ## TODO
 - [x] Searching `std` and `builtin`
-- [ ] Searching `@import`ed pacakges by package mamnager
+~~- [ ] Searching `@import`ed pacakges by package mamnager~~
 - [ ] Searching `fn` declarations in `struct`. (keep in mind that `struct` declaration can take place in `fn` body)
 - [ ] Evaluate field access while calculating distance of types, so (`std.mem.Allocator` and `Allocator` become equivalent, somehow). There can be many more funny things to do once we open up the door of field access.
 - [ ] Installation through package manager
