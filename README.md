@@ -48,7 +48,7 @@ When `-r` is not specified, zoogle use default value of 1, which only search the
 clone and `zig build`, then run `./zig-out/bin/zoogle` to see help.
 
 ## TODO
-- [ ] Searching `root`, `std` and `builtin`
+- [x] Searching `std` and `builtin`
 - [ ] Searching `@import`ed pacakges by package mamnager
 - [ ] Searching `fn` declarations in `struct`. (keep in mind that `struct` declaration can take place in `fn` body)
 - [ ] Evaluate field access while calculating distance of types, so (`std.mem.Allocator` and `Allocator` become equivalent, somehow). There can be many more funny things to do once we open up the door of field access.
