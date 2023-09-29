@@ -511,6 +511,7 @@ fn debugAst(ast: Ast) void {
 }
 
 
+
 var ta = std.testing.allocator;
 
 test "Split" {
@@ -543,9 +544,10 @@ test "Split" {
     std.debug.print("\n{}\n", .{match_fn_proto});
     debugAst(match_ast);
     try PrintFn(stderr, match_ast, match_fn_proto);
-    const return_dist = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
-    std.debug.print("FuzzyMatchType(return_type) => {}\n", .{return_dist});
-    std.debug.print("FuzzyMatchFn => {}\n", .{FuzzyMatchFn(ta, &match_ast, &ast, match_fn_proto, fn_proto)});
+    var t1 = std.time.microTimestamp();
+    const return_dist1 = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
+    t1 = std.time.microTimestamp() - t1;
+    std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds ({})ms\n", .{return_dist1, t1});
     
     // const ta = std.heap.testAllocator(st)
 }
