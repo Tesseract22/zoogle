@@ -124,6 +124,13 @@ fn FuzzyMatchIdentifier(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast
 
 const u32Max = std.math.maxInt(u32);
 
+
+fn SimpleTokenRender(tree: *Ast, t: Ast.TokenIndex) []const u8 {
+    const start = tree.tokens.items(.start)[t];
+    const end = tree.tokens.items(.start)[t + 1];
+    return tree.source[start..end];
+}
+
 const Context = struct {
     const Index = Ast.TokenIndex;
     const Self = @This();
@@ -140,7 +147,7 @@ const Context = struct {
     pub fn cost(tree: *Ast, i: ?Index) u32 {
         if (i) |index| {
             if (tree.tokens.items(.tag)[index] == .identifier) {
-                return @intCast(tree.tokenSlice(index).len);
+                return @intCast(SimpleTokenRender(tree, index).len);
             }
             return 1;
         }
@@ -158,7 +165,7 @@ const Context = struct {
         const s_tag = ctx.s_tree.tokens.items(.tag)[si];
         const t_tag = ctx.t_tree.tokens.items(.tag)[ti];
         if (s_tag == .identifier and t_tag == .identifier) {
-            return LevenshteinDistance(ctx.allocator.*, ctx.s_tree.tokenSlice(si), ctx.t_tree.tokenSlice(ti)) catch u32Max;
+            return LevenshteinDistance(ctx.allocator.*, SimpleTokenRender(ctx.s_tree, si), SimpleTokenRender(ctx.t_tree, ti)) catch u32Max;
         }
         return if (s_tag == t_tag) 1 else 0;
     }
@@ -174,9 +181,16 @@ const Context = struct {
         ctx.t_curr = ctx.t_start;
     }
 };
+
+var type_ct: usize = 0;
+var type_time: i64 = 0;
+var fn_ct: usize = 0;
+var fn_time: i64 = 0;
+
 const NodeIndexArr = std.ArrayList(Ast.Node.Index);
 fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
-
+    const t = std.time.microTimestamp();
+    type_ct += 1;
     const Index = Ast.TokenIndex;
 
     const a_first = a_tree.firstToken(a);
@@ -184,9 +198,11 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     const b_first = b_tree.firstToken(b);
     const b_len = b_tree.lastToken(b) - b_first + 1;
     var ctx = Context.init(a_first, b_first, a_tree, b_tree, &allocator);
-    return LevenshteinDistanceOptions(Index, Context)
+    const d = LevenshteinDistanceOptions(Index, Context)
             (allocator, a_len, b_len, 
             &ctx, .{.dist = Context.dist, .nextT = Context.nextT, .nextS = Context.nextS, .resetT = Context.resetT}) catch u32Max;
+    type_time += (std.time.microTimestamp() - t);
+    return d;
     
 }
 
@@ -201,6 +217,8 @@ fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
 }
 
 fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
+    const t = std.time.microTimestamp();
+    fn_ct += 1;
     var dist: u32 = 0;
     if (a.name_token != null and b.name_token != null) {
         dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
@@ -227,6 +245,7 @@ fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast
         // std.log.debug("param dist: {}", .{dist});
 
     }
+    fn_time += (std.time.microTimestamp() - t);
     return dist;
 }
 
@@ -487,6 +506,10 @@ pub fn main() !void {
     }
 
     // _ = token_tags;
+    const fn_average: f64 = @as(f64, @floatFromInt(fn_time)) / @as(f64, @floatFromInt(fn_ct));
+    const type_average: f64 = @as(f64, @floatFromInt(type_time)) / @as(f64, @floatFromInt(type_ct));
+    try stdout.print("stats:\ntime: {}, #: {}, average: {d:.3} ({d:.3}). MatchType time: {}, #: {}, average: {d:.3} ({d:.3})\n", .{fn_time, fn_ct, fn_average, fn_average / 1000, type_time, type_ct, type_average, type_average / 1000});
+
     try bw.flush();
     // debugAst(match_ast);
 
