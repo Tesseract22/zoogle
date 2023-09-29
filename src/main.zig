@@ -443,3 +443,42 @@ fn debugAst(ast: Ast) void {
         debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, @intCast(i)) });
     }
 }
+const ta = std.testing.allocator;
+
+test "Split" {
+    const stderr = std.io.getStdErr().writer();
+    const split_fn_str = 
+    \\pub fn splitAny(comptime T: type, buffer: []const T, delimiters: []const T) SplitIterator(T, .any) {
+    \\  return .{
+    \\    .index = 0,
+    \\    .buffer = buffer,
+    \\    .delimiter = delimiters,
+    \\  };
+    \\}
+;
+    // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
+    var ast = try Ast.parse(ta, split_fn_str, .zig);
+    defer ast.deinit(ta);
+    var buf: Ast.Node.Index = undefined;
+    const fn_proto = try ParseFuncDecl(&ast, &buf);
+
+    const match_fn_str = "fn split(type, []const T, []const T) SplitIterator";
+    var match_ast = try Ast.parse(ta, match_fn_str, .zig);
+    defer match_ast.deinit(ta);
+    var match_buf: Ast.Node.Index = undefined;
+    const match_fn_proto = try ParseFuncInline(&match_ast, &match_buf);
+
+    std.debug.print("\n{}\n", .{fn_proto});
+    debugAst(ast);
+    try PrintFn(stderr, ast, fn_proto);
+
+    std.debug.print("\n{}\n", .{match_fn_proto});
+    debugAst(match_ast);
+    try PrintFn(stderr, match_ast, match_fn_proto);
+    var t1 = std.time.microTimestamp();
+    const return_dist1 = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
+    t1 = std.time.microTimestamp() - t1;
+    std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds ({})ms\n", .{return_dist1, t1});
+    
+    // const ta = std.heap.testAllocator(st)
+}
