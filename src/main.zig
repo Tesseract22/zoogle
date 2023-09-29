@@ -19,33 +19,51 @@ fn tokenRender(tree: Ast, token_index: ?Ast.TokenIndex) []const u8 {
     }
     return "";
 }
+fn ParseFuncInline(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
+    // ast.fullFnProto(, node: Node.Index)
+    for (ast.nodes.items(.tag), 0..) |t, i| {
+        _ = t;
+        buf.* = @intCast(i);
+        return ast.fullFnProto(buf, @intCast(i)) orelse continue;
+        // return ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
+    }
 
-fn PrintExpr(tree: Ast, type_index: Ast.Node.Index) !void {
+    return error.InvalidMatchSyntax;
+}
+
+fn ParseFuncDecl(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
+    for (ast.rootDecls()) |d| {
+        return ast.fullFnProto(buf, d) orelse continue;
+    }
+    return error.InvalidMatchSyntax;
+}
+
+fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
     const first_token = tree.firstToken(type_index);
     const last_token = tree.lastToken(type_index);
     for (first_token..last_token + 1) |i| {
-        _ = try stdout.print("{s}", .{tokenRender(tree, @intCast(i))});
+        _ = try writer.print("{s}", .{tokenRender(tree, @intCast(i))});
     }
 }
-fn PrintFn(tree: Ast, fnProto: Ast.full.FnProto) !void {
+fn PrintFn(writer: anytype, tree: Ast, fnProto: Ast.full.FnProto) !void {
     if (fnProto.visib_token) |v| {
-        try stdout.print("{s} ", .{tokenRender(tree, v)});
+        try writer.print("{s} ", .{tokenRender(tree, v)});
     }
-    try stdout.print("fn {s}(", .{tokenRender(tree, fnProto.name_token)});
+    try writer.print("fn {s}(", .{tokenRender(tree, fnProto.name_token)});
     var iterator = fnProto.iterate(&tree);
     while (iterator.next()) |param| {
-        try stdout.print("{s}: ", .{tokenRender(tree, param.name_token)});
-        try PrintExpr(tree, param.type_expr);
-        if (iterator.param_i != fnProto.ast.params.len) try stdout.print(", ", .{});
+        try writer.print("{s}: ", .{tokenRender(tree, param.name_token)});
+        try PrintExpr(writer, tree, param.type_expr);
+        if (iterator.param_i != fnProto.ast.params.len) try writer.print(", ", .{});
     }
-    _ = try stdout.write(") ");
+    _ = try writer.write(") ");
     if (fnProto.ast.callconv_expr != 0) {
-        _ = try stdout.write("callconv(");
-        try PrintExpr(tree, fnProto.ast.callconv_expr);
-        _ = try stdout.write(") ");
+        _ = try writer.write("callconv(");
+        try PrintExpr(writer, tree, fnProto.ast.callconv_expr);
+        _ = try writer.write(") ");
     }
-    try PrintExpr(tree, fnProto.ast.return_type);
-    _ = try stdout.write("\n");
+    try PrintExpr(writer, tree, fnProto.ast.return_type);
+    _ = try writer.write("\n");
 }
 
 fn FormatFn(allocator: std.mem.Allocator, tree: Ast, fnProto: Ast.full.FnProto) ![]u8 {
@@ -447,15 +465,15 @@ const ta = std.testing.allocator;
 
 test "Split" {
     const stderr = std.io.getStdErr().writer();
-    const split_fn_str = 
-    \\pub fn splitAny(comptime T: type, buffer: []const T, delimiters: []const T) SplitIterator(T, .any) {
-    \\  return .{
-    \\    .index = 0,
-    \\    .buffer = buffer,
-    \\    .delimiter = delimiters,
-    \\  };
-    \\}
-;
+    const split_fn_str =
+        \\pub fn splitAny(comptime T: type, buffer: []const T, delimiters: []const T) SplitIterator(T, .any) {
+        \\  return .{
+        \\    .index = 0,
+        \\    .buffer = buffer,
+        \\    .delimiter = delimiters,
+        \\  };
+        \\}
+    ;
     // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
     var ast = try Ast.parse(ta, split_fn_str, .zig);
     defer ast.deinit(ta);
@@ -478,7 +496,7 @@ test "Split" {
     var t1 = std.time.microTimestamp();
     const return_dist1 = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
     t1 = std.time.microTimestamp() - t1;
-    std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds ({})ms\n", .{return_dist1, t1});
-    
+    std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds\n", .{ return_dist1, t1 });
+
     // const ta = std.heap.testAllocator(st)
 }

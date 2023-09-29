@@ -92,12 +92,3 @@ test "distance" {
     try TestDistance("hello", "hllo", 1);
     try TestDistance("asfl;asvma;sd", "asfa[od; m", 8);
 }
-
-fn u8Eql(a: u8, b: u8) bool {
-    return a == b;
-}
-
-test "distance options" {
-    const d = try LevenshteinDistanceOptions(u8)(std.testing.allocator, "hello", "hllo", .{ .eql = u8Eql });
-    std.debug.print("distance: {}\n", .{d});
-}
