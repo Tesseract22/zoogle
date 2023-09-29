@@ -20,32 +20,51 @@ fn tokenRender(tree: Ast, token_index: ?Ast.TokenIndex) []const u8 {
     return "";
 }
 
-fn PrintExpr(tree: Ast, type_index: Ast.Node.Index) !void {
+fn ParseFuncInline(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
+    // ast.fullFnProto(, node: Node.Index)
+    for (ast.nodes.items(.tag), 0..) |t, i| {
+        _ = t;
+        buf.* = @intCast(i);
+        return ast.fullFnProto(buf, @intCast(i)) orelse continue;
+        // return ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
+    }
+
+    return error.InvalidMatchSyntax;
+}
+
+fn ParseFuncDecl(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
+    for (ast.rootDecls()) |d| {
+        return ast.fullFnProto(buf, d) orelse continue;
+    }
+    return error.InvalidMatchSyntax;
+}
+
+fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
     const first_token = tree.firstToken(type_index);
     const last_token = tree.lastToken(type_index);
     for (first_token..last_token + 1) |i| {
-        _ = try stdout.print("{s}", .{tokenRender(tree, @intCast(i))});
+        _ = try writer.print("{s}", .{tokenRender(tree, @intCast(i))});
     }
 }
-fn PrintFn(tree: Ast, fnProto: Ast.full.FnProto) !void {
+fn PrintFn(writer: anytype, tree: Ast, fnProto: Ast.full.FnProto) !void {
     if (fnProto.visib_token) |v| {
-        try stdout.print("{s} ", .{tokenRender(tree, v)});
+        try writer.print("{s} ", .{tokenRender(tree, v)});
     }
-    try stdout.print("fn {s}(", .{tokenRender(tree, fnProto.name_token)});
+    try writer.print("fn {s}(", .{tokenRender(tree, fnProto.name_token)});
     var iterator = fnProto.iterate(&tree);
     while (iterator.next()) |param| {
-        try stdout.print("{s}: ", .{tokenRender(tree, param.name_token)});
-        try PrintExpr(tree, param.type_expr);
-        if (iterator.param_i != fnProto.ast.params.len) try stdout.print(", ", .{});
+        try writer.print("{s}: ", .{tokenRender(tree, param.name_token)});
+        try PrintExpr(writer, tree, param.type_expr);
+        if (iterator.param_i != fnProto.ast.params.len) try writer.print(", ", .{});
     }
-    _ = try stdout.write(") ");
+    _ = try writer.write(") ");
     if (fnProto.ast.callconv_expr != 0) {
-        _ = try stdout.write("callconv(");
-        try PrintExpr(tree, fnProto.ast.callconv_expr);
-        _ = try stdout.write(") ");
+        _ = try writer.write("callconv(");
+        try PrintExpr(writer, tree, fnProto.ast.callconv_expr);
+        _ = try writer.write(") ");
     }
-    try PrintExpr(tree, fnProto.ast.return_type);
-    _ = try stdout.write("\n");
+    try PrintExpr(writer, tree, fnProto.ast.return_type);
+    _ = try writer.write("\n");
 }
 
 fn FormatFn(allocator: std.mem.Allocator, tree: Ast, fnProto: Ast.full.FnProto) ![]u8 {
@@ -103,22 +122,74 @@ fn FuzzyMatchIdentifier(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast
     return LevenshteinDistance(allocator, tokenRender(a_tree, a_token), tokenRender(b_tree, b_token)) catch std.math.maxInt(u32);
 }
 
-const TokenTag = std.zig.Token.Tag;
+const u32Max = std.math.maxInt(u32);
 
-fn EqlTag(ctx: ?*anyopaque, a: TokenTag, b: TokenTag) bool {
-    _ = ctx;
-    return a == b;
-}
-
+const Context = struct {
+    const Index = Ast.TokenIndex;
+    const Self = @This();
+    s_tree: *Ast,
+    t_tree: *Ast,
+    s_start: Index,
+    t_start: Index,
+    s_curr: Index,
+    t_curr: Index,
+    allocator: *const std.mem.Allocator,
+    pub fn init(s_start: Index, t_start: Index,s_tree: *Ast,t_tree: *Ast, allocator: *const std.mem.Allocator) Context {
+        return .{.s_tree = s_tree, .t_tree = t_tree, .s_start = s_start, .t_start = t_start, .s_curr = s_start, .t_curr = t_start, .allocator = allocator};
+    }
+    pub fn cost(tree: *Ast, i: ?Index) u32 {
+        if (i) |index| {
+            if (tree.tokens.items(.tag)[index] == .identifier) {
+                return @intCast(tree.tokenSlice(index).len);
+            }
+            return 1;
+        }
+        return 0;
+    }
+    pub fn dist(ctx: *Self, s: ?Index, t: ?Index) u32 {
+        if (s == null) {
+            return cost(ctx.t_tree, t);
+        }
+        if (t == null) {
+            return cost(ctx.s_tree, s);
+        }
+        const si = s.?;
+        const ti = t.?;
+        const s_tag = ctx.s_tree.tokens.items(.tag)[si];
+        const t_tag = ctx.t_tree.tokens.items(.tag)[ti];
+        if (s_tag == .identifier and t_tag == .identifier) {
+            return LevenshteinDistance(ctx.allocator.*, ctx.s_tree.tokenSlice(si), ctx.t_tree.tokenSlice(ti)) catch u32Max;
+        }
+        return if (s_tag == t_tag) 1 else 0;
+    }
+    pub fn nextT(ctx: *Self) ?Index {
+        defer ctx.t_curr += 1;
+        return ctx.t_curr;
+    }
+    pub fn nextS(ctx: *Self) ?Index {
+        defer ctx.s_curr += 1;
+        return ctx.s_curr;
+    }
+    pub fn resetT(ctx: *Self) void {
+        ctx.t_curr = ctx.t_start;
+    }
+};
+const NodeIndexArr = std.ArrayList(Ast.Node.Index);
 fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
-    const a_type = a_tree.tokens.items(.tag)[a_tree.firstToken(a)..a_tree.lastToken(a)];
-    const b_type = b_tree.tokens.items(.tag)[b_tree.firstToken(b)..b_tree.lastToken(b)];
-    var d = LevenshteinDistanceOptions(TokenTag)(allocator, a_type, b_type, .{ .eql = EqlTag }) catch return std.math.maxInt(u32);
-    const a_param_name = tokenRender(a_tree.*, a_tree.lastToken(a));
-    const b_param_name = tokenRender(b_tree.*, b_tree.lastToken(b));
-    d += LevenshteinDistance(allocator, a_param_name, b_param_name) catch return std.math.maxInt(u32);
-    return d;
+
+    const Index = Ast.TokenIndex;
+
+    const a_first = a_tree.firstToken(a);
+    const a_len = a_tree.lastToken(a) - a_first + 1;
+    const b_first = b_tree.firstToken(b);
+    const b_len = b_tree.lastToken(b) - b_first + 1;
+    var ctx = Context.init(a_first, b_first, a_tree, b_tree, &allocator);
+    return LevenshteinDistanceOptions(Index, Context)
+            (allocator, a_len, b_len, 
+            &ctx, .{.dist = Context.dist, .nextT = Context.nextT, .nextS = Context.nextS, .resetT = Context.resetT}) catch u32Max;
+    
 }
+
 
 fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
     var d: u32 = 0;
@@ -365,14 +436,9 @@ pub fn main() !void {
     var match_ast = try Ast.parse(allocator, match_string, .zig);
     defer match_ast.deinit(allocator);
     // debugAst(match_ast);
-    var match_fn_node: [1]Ast.Node.Index = undefined;
-    const match_fn = eval_fn: {
-        break :eval_fn for (match_ast.nodes.items(.tag), 0..) |t, i| {
-            _ = t;
-            match_fn_node[0] = @intCast(i);
-            break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
-        } else return error.InvalidMatchSyntax;
-    };
+    var match_fn_node: Ast.Node.Index = undefined;
+    const match_fn = try ParseFuncInline(&match_ast, &match_fn_node);
+
     if (match_fn.name_token) |nt| {
         dist_limit += @intCast(tokenRender(match_ast, nt).len);
     }
@@ -383,8 +449,8 @@ pub fn main() !void {
         }
     }
     // try stdout.print("input: {s}\n", .{match_string});
-    std.log.debug("fn node: {}", .{match_fn_node[0]});
-    try PrintFn(match_ast, match_fn);
+    // std.log.debug("fn node: {}", .{match_fn_node[0]});
+    try PrintFn(stdout, match_ast, match_fn);
     var path_buffer = [_]u8{0} ** 1024;
     var path_fba = std.heap.FixedBufferAllocator.init(&path_buffer);
 
@@ -431,15 +497,61 @@ fn add(a: i32, b: i32) i32 {
 }
 
 fn debugAst(ast: Ast) void {
-    const debug = std.log.debug;
-    debug("[{}]Nodes", .{ast.nodes.len});
+    const debug = std.debug.print;
+    debug("[{}]Nodes\n", .{ast.nodes.len});
     for (ast.nodes.items(.tag), 0..) |t, i| {
-        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, ast.nodes.items(.main_token)[i]) });
+        debug("[{}]: {} = \"{s}\"\n", .{ i, t, tokenRender(ast, ast.nodes.items(.main_token)[i]) });
     }
     // try stdout.print("token tags:\n", .{});
     debug("[{}]Tokens", .{ast.tokens.len});
     for (ast.tokens.items(.tag), 0..) |t, i| {
         if (t == .invalid) break;
-        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, @intCast(i)) });
+        debug("[{}]: {} = \"{s}\"\n", .{ i, t, tokenRender(ast, @intCast(i)) });
     }
 }
+
+
+var ta = std.testing.allocator;
+
+test "Split" {
+    const stderr = std.io.getStdErr().writer();
+    const split_fn_str = 
+    \\pub fn splitAny(comptime T: type, buffer: []const T, delimiters: []const T) SplitIterator(T, .any) {
+    \\  return .{
+    \\    .index = 0,
+    \\    .buffer = buffer,
+    \\    .delimiter = delimiters,
+    \\  };
+    \\}
+;
+    // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
+    var ast = try Ast.parse(ta, split_fn_str, .zig);
+    defer ast.deinit(ta);
+    var buf: Ast.Node.Index = undefined;
+    const fn_proto = try ParseFuncDecl(&ast, &buf);
+
+    const match_fn_str = "fn split(type, []const T, []const T) SplitIterator";
+    var match_ast = try Ast.parse(ta, match_fn_str, .zig);
+    defer match_ast.deinit(ta);
+    var match_buf: Ast.Node.Index = undefined;
+    const match_fn_proto = try ParseFuncInline(&match_ast, &match_buf);
+
+    std.debug.print("\n{}\n", .{fn_proto});
+    debugAst(ast);
+    try PrintFn(stderr, ast, fn_proto);
+
+    std.debug.print("\n{}\n", .{match_fn_proto});
+    debugAst(match_ast);
+    try PrintFn(stderr, match_ast, match_fn_proto);
+    const return_dist = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
+    std.debug.print("FuzzyMatchType(return_type) => {}\n", .{return_dist});
+    std.debug.print("FuzzyMatchFn => {}\n", .{FuzzyMatchFn(ta, &match_ast, &ast, match_fn_proto, fn_proto)});
+    
+    // const ta = std.heap.testAllocator(st)
+}
+
+
+
+
+
+
