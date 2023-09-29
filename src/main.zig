@@ -94,7 +94,13 @@ fn ExactMatchType(a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Ind
     return true;
 }
 
+var fn_time: i64 = 0;
+var fn_ct: usize = 0;
+var type_time: i64 = 0;
+var type_ct: usize = 0;
+
 fn ExactMatchfn(a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) bool {
+    fn_ct += 1;
     if (!ExactMatchType(a_tree, b_tree, a.ast.return_type, b.ast.return_type)) return false;
     var ai = a.iterate(a_tree);
     var bi = b.iterate(b_tree);
@@ -129,12 +135,15 @@ fn EqlTag(ctx: ?*anyopaque, a: TokenTag, b: TokenTag) bool {
 }
 
 fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
+    var t = std.time.microTimestamp();
+    type_ct  += 1;
     const a_type = a_tree.tokens.items(.tag)[a_tree.firstToken(a)..a_tree.lastToken(a)];
     const b_type = b_tree.tokens.items(.tag)[b_tree.firstToken(b)..b_tree.lastToken(b)];
     var d = LevenshteinDistanceOptions(TokenTag)(allocator, a_type, b_type, .{ .eql = EqlTag }) catch return std.math.maxInt(u32);
     const a_param_name = tokenRender(a_tree.*, a_tree.lastToken(a));
     const b_param_name = tokenRender(b_tree.*, b_tree.lastToken(b));
     d += LevenshteinDistance(allocator, a_param_name, b_param_name) catch return std.math.maxInt(u32);
+    type_time += (std.time.microTimestamp() - t);
     return d;
 }
 
@@ -148,6 +157,8 @@ fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
 }
 
 fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
+    const t = std.time.microTimestamp();
+    fn_ct += 1;
     var dist: u32 = 0;
     if (a.name_token != null and b.name_token != null) {
         dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
@@ -174,6 +185,8 @@ fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast
         // std.log.debug("param dist: {}", .{dist});
 
     }
+    fn_time += (std.time.microTimestamp() - t);
+
     return dist;
 }
 
@@ -402,7 +415,7 @@ pub fn main() !void {
     }
     // try stdout.print("input: {s}\n", .{match_string});
     std.log.debug("fn node: {}", .{match_fn_node[0]});
-    try PrintFn(match_ast, match_fn);
+    try PrintFn(stdout, match_ast, match_fn);
     var path_buffer = [_]u8{0} ** 1024;
     var path_fba = std.heap.FixedBufferAllocator.init(&path_buffer);
 
@@ -437,9 +450,13 @@ pub fn main() !void {
         allocator.free(fr.location.file);
         allocator.destroy(fr);
     }
+    const fn_average: f64 = @as(f64, @floatFromInt(fn_time)) / @as(f64, @floatFromInt(fn_ct));
+    const type_average: f64 = @as(f64, @floatFromInt(type_time)) / @as(f64, @floatFromInt(type_ct));
+    try stdout.print("stats:\ntime: {}, #: {}, average: {:.3}. MatchType time: {}, #: {}, average: {:.3}\n", .{fn_time, fn_ct, fn_average, type_time, type_ct, type_average});
 
     // _ = token_tags;
     try bw.flush();
+
     // debugAst(match_ast);
 
 }
