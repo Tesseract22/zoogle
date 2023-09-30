@@ -133,6 +133,8 @@ fn SimpleTokenRender(tree: *Ast, t: Ast.TokenIndex) []const u8 {
 
 const Context = struct {
     const Index = Ast.TokenIndex;
+    const StringPair = struct { first: []const u8, second: []const u8};
+    const StringDistCache = std.HashMap(StringPair, u32, *Self, 80);
     const Self = @This();
     s_tree: *Ast,
     t_tree: *Ast,
@@ -140,9 +142,15 @@ const Context = struct {
     t_start: Index,
     s_curr: Index,
     t_curr: Index,
+    cache: StringDistCache,
     allocator: *const std.mem.Allocator,
     pub fn init(s_start: Index, t_start: Index,s_tree: *Ast,t_tree: *Ast, allocator: *const std.mem.Allocator) Context {
-        return .{.s_tree = s_tree, .t_tree = t_tree, .s_start = s_start, .t_start = t_start, .s_curr = s_start, .t_curr = t_start, .allocator = allocator};
+        var ctx = Context {.s_tree = s_tree, .t_tree = t_tree, .s_start = s_start, .t_start = t_start, .s_curr = s_start, .t_curr = t_start, .allocator = allocator, .cache = undefined};
+        ctx.cache = StringDistCache.initContext(allocator.*, &ctx);
+        return ctx;
+    }
+    pub fn deinit(ctx: *Self) void {
+        ctx.cache.deinit();
     }
     pub fn cost(tree: *Ast, i: ?Index) u32 {
         if (i) |index| {
@@ -164,8 +172,18 @@ const Context = struct {
         const ti = t.?;
         const s_tag = ctx.s_tree.tokens.items(.tag)[si];
         const t_tag = ctx.t_tree.tokens.items(.tag)[ti];
+        // This contributes most the of time
         if (s_tag == .identifier and t_tag == .identifier) {
-            return LevenshteinDistance(ctx.allocator.*, SimpleTokenRender(ctx.s_tree, si), SimpleTokenRender(ctx.t_tree, ti)) catch u32Max;
+            const ss = StringPair {.first = SimpleTokenRender(ctx.s_tree, si), .second = SimpleTokenRender(ctx.t_tree, ti)};
+            if (ctx.cache.get(ss)) |d| {
+                // std.debug.print("seen before! {s} {s}\n", .{ss.first, ss.second});
+                return d;
+            } else {
+                const d = LevenshteinDistance(ctx.allocator.*,  ss.first, ss.second) catch u32Max;
+                ctx.cache.put(ss, d) catch unreachable;
+                return d;
+            }
+
         }
         return if (s_tag == t_tag) 1 else 0;
     }
@@ -179,6 +197,20 @@ const Context = struct {
     }
     pub fn resetT(ctx: *Self) void {
         ctx.t_curr = ctx.t_start;
+    }
+
+    pub fn hash(ctx: *Self, k: StringPair) u64 {
+        _ = ctx;
+        var buf: [1024]u8 = undefined;
+        var s1 = buf[0..k.first.len];
+        var s2 = buf[k.first.len..k.first.len + k.second.len];
+        @memcpy(s1 ,k.first);
+        @memcpy(s2, k.second);
+        return std.hash_map.hashString(&buf);
+    }
+    pub fn eql(ctx: *Self, a: StringPair, b: StringPair) bool {
+        _ = ctx;
+        return std.mem.eql(u8, a.first, b.first) and std.mem.eql(u8, a.second, b.second);
     }
 };
 
@@ -198,6 +230,7 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     const b_first = b_tree.firstToken(b);
     const b_len = b_tree.lastToken(b) - b_first + 1;
     var ctx = Context.init(a_first, b_first, a_tree, b_tree, &allocator);
+    defer ctx.deinit();
     const d = LevenshteinDistanceOptions(Index, Context)
             (allocator, a_len, b_len, 
             &ctx, .{.dist = Context.dist, .nextT = Context.nextT, .nextS = Context.nextS, .resetT = Context.resetT}) catch u32Max;
