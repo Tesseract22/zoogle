@@ -4,229 +4,21 @@ const Ast = std.zig.Ast;
 const assert = std.debug.assert;
 const FileSet = std.AutoHashMap(std.fs.File.INode, void);
 
-const LVDistance = @import("distance.zig");
-const LevenshteinDistance = LVDistance.LevenshteinDistance;
-const LevenshteinDistanceOptions = LVDistance.LevenshteinDistanceOptions;
+const Zoogle = @import("zoogle.zig");
 
 const Color = @import("color.zig").Color;
 
 const stdout_file = std.io.getStdOut().writer();
 var bw = std.io.bufferedWriter(stdout_file);
 const stdout = bw.writer();
-fn tokenRender(tree: Ast, token_index: ?Ast.TokenIndex) []const u8 {
-    if (token_index) |i| {
-        return Ast.tokenSlice(tree, i);
-    }
-    return "";
-}
-fn ParseFuncInline(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
-    // ast.fullFnProto(, node: Node.Index)
-    for (ast.nodes.items(.tag), 0..) |t, i| {
-        _ = t;
-        buf.* = @intCast(i);
-        return ast.fullFnProto(buf, @intCast(i)) orelse continue;
-        // return ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
-    }
 
-    return error.InvalidMatchSyntax;
-}
-
-fn ParseFuncDecl(ast: *Ast, buf: *Ast.Node.Index) !Ast.full.FnProto {
-    for (ast.rootDecls()) |d| {
-        return ast.fullFnProto(buf, d) orelse continue;
-    }
-    return error.InvalidMatchSyntax;
-}
-
-fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
-    const first_token = tree.firstToken(type_index);
-    const last_token = tree.lastToken(type_index);
-    for (first_token..last_token + 1) |i| {
-        _ = try writer.print("{s}", .{tokenRender(tree, @intCast(i))});
-    }
-}
-fn PrintFn(writer: anytype, tree: Ast, fnProto: Ast.full.FnProto) !void {
-    if (fnProto.visib_token) |v| {
-        try writer.print("{s} ", .{tokenRender(tree, v)});
-    }
-    try writer.print("fn {s}(", .{tokenRender(tree, fnProto.name_token)});
-    var iterator = fnProto.iterate(&tree);
-    while (iterator.next()) |param| {
-        try writer.print("{s}: ", .{tokenRender(tree, param.name_token)});
-        try PrintExpr(writer, tree, param.type_expr);
-        if (iterator.param_i != fnProto.ast.params.len) try writer.print(", ", .{});
-    }
-    _ = try writer.write(") ");
-    if (fnProto.ast.callconv_expr != 0) {
-        _ = try writer.write("callconv(");
-        try PrintExpr(writer, tree, fnProto.ast.callconv_expr);
-        _ = try writer.write(") ");
-    }
-    try PrintExpr(writer, tree, fnProto.ast.return_type);
-    _ = try writer.write("\n");
-}
-
-fn FormatFn(allocator: std.mem.Allocator, tree: Ast, fnProto: Ast.full.FnProto) ![]u8 {
-    const start = tree.tokens.items(.start)[@intCast(fnProto.name_token.?)];
-    const end = tree.tokens.items(.start)[tree.lastToken(fnProto.ast.return_type) + 1];
-    const slice = try allocator.alloc(u8, end - start);
-    @memcpy(slice, tree.source[start..end]);
-    return slice;
-}
-
-fn ExactMatchType(a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) bool {
-    const a_first = a_tree.firstToken(a);
-    const a_last = a_tree.lastToken(a);
-    const b_first = b_tree.firstToken(b);
-    const b_last = b_tree.lastToken(b);
-    if (a_last - a_first != b_last - b_first) return false;
-    for (a_first..a_last + 1, b_first..b_last + 1) |ai, bi| {
-        const a_tag = a_tree.tokens.items(.tag)[ai];
-        const b_tag = b_tree.tokens.items(.tag)[bi];
-        if (a_tag != b_tag) return false;
-        switch (a_tag) {
-            .identifier => {
-                if (!std.mem.eql(u8, tokenRender(a_tree.*, @intCast(ai)), tokenRender(b_tree.*, @intCast(bi)))) return false;
-            },
-            else => {},
-        }
-    }
-    return true;
-}
+const File = std.fs.File;
+const Dir = std.fs.Dir;
 
 var fn_time: i64 = 0;
 var fn_ct: usize = 0;
 var type_time: i64 = 0;
 var type_ct: usize = 0;
-
-fn ExactMatchfn(a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) bool {
-    fn_ct += 1;
-    if (!ExactMatchType(a_tree, b_tree, a.ast.return_type, b.ast.return_type)) return false;
-    var ai = a.iterate(a_tree);
-    var bi = b.iterate(b_tree);
-    while (true) {
-        const ap = ai.next();
-        const bp = bi.next();
-        if (ap == null and bp == null) {
-            break;
-        } else if (ap == null or bp == null) {
-            return false;
-        }
-        if (!ExactMatchType(a_tree, b_tree, ap.?.type_expr, bp.?.type_expr)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn FuzzyMatchIdentifier(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
-    assert(a_tree.nodes.items(.tag)[a] == .identifier);
-    assert(b_tree.nodes.items(.tag)[b] == .identifier);
-    const a_token = a_tree.nodes.items(.main_token)[a];
-    const b_token = a_tree.nodes.items(.main_token)[b];
-    return LevenshteinDistance(allocator, tokenRender(a_tree, a_token), tokenRender(b_tree, b_token)) catch std.math.maxInt(u32);
-}
-
-const TokenTag = std.zig.Token.Tag;
-
-fn EqlTag(ctx: ?*anyopaque, a: TokenTag, b: TokenTag) bool {
-    _ = ctx;
-    return a == b;
-}
-
-fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
-    var t = std.time.microTimestamp();
-    defer type_time += (std.time.microTimestamp() - t);
-    type_ct  += 1;
-    const a_first = a_tree.tokens.items(.start)[a_tree.firstToken(a)];
-    const a_last = a_tree.tokens.items(.start)[a_tree.lastToken(a) + 1];
-    const a_param = a_tree.source[a_first..a_last];
-
-    const b_first = b_tree.tokens.items(.start)[b_tree.firstToken(b)];
-    const b_last = b_tree.tokens.items(.start)[b_tree.lastToken(b) + 1];
-    const b_param = b_tree.source[b_first..b_last];
-    
-    return LevenshteinDistance(allocator, a_param, b_param) catch std.math.maxInt(u32);
-}
-
-fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
-    var d: u32 = 0;
-    const last_token = tree.lastToken(a);
-    const a_type = tree.tokens.items(.tag)[tree.firstToken(a)..last_token];
-    d += @intCast(a_type.len);
-    d += @intCast(tokenRender(tree, last_token).len);
-    return d;
-}
-
-fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
-    const t = std.time.microTimestamp();
-    fn_ct += 1;
-    var dist: u32 = 0;
-    if (a.name_token != null and b.name_token != null) {
-        dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
-    }
-    dist += FuzzyMatchType(allocator, a_tree, b_tree, a.ast.return_type, b.ast.return_type);
-    // std.log.debug("return dist: {}", .{dist});
-    var ai = a.iterate(a_tree);
-    var bi = b.iterate(b_tree);
-    while (true) {
-        const ap = ai.next();
-        const bp = bi.next();
-        if (ap == null and bp == null) {
-            break;
-        } else if (ap == null) {
-            dist += FuzzyCostType(b_tree.*, bp.?.type_expr) * 2;
-        } else if (bp == null) {
-            dist += FuzzyCostType(a_tree.*, ap.?.type_expr) * 2;
-        } else {
-            const a_name = tokenRender(a_tree.*, ap.?.name_token);
-            const b_name = tokenRender(b_tree.*, bp.?.name_token);
-            dist += (LevenshteinDistance(allocator, a_name, b_name) catch return std.math.maxInt(u32));
-            dist += FuzzyMatchType(allocator, a_tree, b_tree, ap.?.type_expr, bp.?.type_expr);
-        }
-        // std.log.debug("param dist: {}", .{dist});
-
-    }
-    fn_time += (std.time.microTimestamp() - t);
-
-    return dist;
-}
-
-const OpenError = std.fs.File.OpenError;
-const ParseError = error{
-    ExpectFileArgument,
-    ExpectMatchArgument,
-    InvalidMatchSyntax,
-    InvalidArgumentOption,
-    PacakageNotFound,
-};
-
-const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
-const FnResult = struct {
-    fnString: []const u8,
-    distance: u32,
-    location: struct {
-        file: []const u8,
-        line: usize,
-        column: usize,
-    },
-    const self = @This();
-    pub fn compare(ctx: ?*anyopaque, a: *self, b: *self) std.math.Order {
-        _ = ctx;
-        return std.math.order(a.distance, b.distance);
-    }
-};
-const File = std.fs.File;
-const Dir = std.fs.Dir;
-
-fn OpenDirOfFile(file_path: []const u8, cwd: Dir) !Dir {
-    return cwd.openDir(GetDirOfPath(file_path), .{});
-}
-
-fn GetDirOfPath(file_path: []const u8) []const u8 {
-    const last_slash_index = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return "."; // windows compatiblity?
-    return file_path[0..last_slash_index];
-}
 
 fn PrintUsage() void {
     std.debug.print("zoogle $path_to_file $search_string [-r $recursive_depth]\n", .{});
@@ -234,70 +26,7 @@ fn PrintUsage() void {
     std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name]: $var_type, ...) $var_type\"\n", .{"where"});
 }
 
-fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, dir: *std.heap.FixedBufferAllocator, file_set: *FileSet, depth: u32) !void {
-    const file_size = (file.stat() catch |e| {
-        std.log.err("Cannot get file size", .{});
-        return e;
-    }).size;
-    const source = allocator.allocSentinel(u8, file_size, 0) catch |e| {
-        std.log.err("failed to allocate {} bytes to read file\n", .{file_size});
-        return e;
-    };
-    defer allocator.free(source);
-    _ = try file.readAll(source);
-    var ast = try Ast.parse(allocator, source, .zig);
-    defer ast.deinit(allocator);
-    for (ast.rootDecls()) |d| {
-        var buffer: [1]Ast.Node.Index = undefined;
-        var fn_proto = ast.fullFnProto(&buffer, d) orelse continue;
-        const distance = FuzzyMatchFn(allocator, &ast, match_ast, fn_proto, match_fn);
-        std.log.debug("fn {s}() distance: {}", .{ tokenRender(ast, fn_proto.name_token), distance });
-        if (distance > dist_limit) continue;
-        const fn_result = try allocator.create(FnResult);
-        const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
-        fn_result.* = .{ .fnString = try FormatFn(allocator, ast, fn_proto), .distance = distance, .location = .{ .file = try RelativePathFromCwd(allocator, dir.buffer[0..dir.end_index]), .line = location.line, .column = location.column } };
-        try queue.add(fn_result);
-    }
-    if (depth == 1) return;
 
-    const cwd_path = GetDirOfPath(dir.buffer[0..dir.end_index]);
-    dir.end_index = cwd_path.len;
-    var cwd = try std.fs.openDirAbsolute(cwd_path, .{});
-    std.log.debug("Currently in: {s}", .{cwd_path});
-    defer cwd.close();
-    for (ast.nodes.items(.tag), 0..) |t, i| {
-        switch (t) {
-            .builtin_call_two,
-            .builtin_call,
-            => {
-                const token = tokenRender(ast, ast.nodes.items(.main_token)[i]);
-                if (std.mem.eql(u8, token, "@import")) {
-                    const arg = ast.nodes.items(.data)[i];
-                    const file_name_quote = tokenRender(ast, ast.nodes.items(.main_token)[arg.lhs]);
-                    const file_name = file_name_quote[1 .. file_name_quote.len - 1];
-                    std.log.debug("@import({s})", .{file_name_quote});
-                    if (!std.mem.endsWith(u8, file_name, ".zig")) continue;
-
-                    var next_file = try cwd.openFile(file_name, .{ .mode = .read_only });
-                    defer next_file.close();
-                    _ = try std.fmt.allocPrint(dir.allocator(), "/{s}", .{file_name});
-                    defer dir.end_index = cwd_path.len;
-                    // std.log.debug("new dir: {s}", .{dir.buffer[0..dir.end_index]});
-
-                    const inode = (try next_file.stat()).inode;
-                    if (file_set.contains(inode)) {
-                        continue;
-                    } else {
-                        try file_set.put(inode, {});
-                    }
-                    std.log.debug("Searching next file: {s}", .{file_name});
-                    try SearchFile(allocator, next_file, queue, match_ast, match_fn, dir, file_set, depth - 1);
-                }
-            },
-            else => {},
-        }
-    }
-}
 
 fn StdLibrary(lib: []const u8) ![]const u8 {
     if (std.mem.eql(u8, lib, "std")) {
@@ -321,50 +50,37 @@ fn FindFromSysPath(allocator: std.mem.Allocator, file_name: []const u8) ![]const
     }
     return error.PacakageNotFound;
 }
-fn RelativePathFromCwd(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    // path: "/abc/123/"
-    // cwd:  "/abc/1234/xyz/"
-    // ../../123
 
-    // path: "/abc/1234/xyz/"
-    // cwd:  "/abc/123/"
-    // ../1234/xyz
-
-    // path: "/abc/123/xyz/"
-    // cwd:  "/abc/123/"
-    // xyz
-    assert(path[0] == '/');
-    const abs_cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
-    defer allocator.free(abs_cwd);
-    var prev_slash_i: u32 = 0;
-    const min_len = @min(path.len, abs_cwd.len);
-
-    for (path[0..min_len], abs_cwd[0..min_len], 0..) |ac, bc, i| {
-        if (ac != bc) {
-            break;
-        } else if (ac == '/') {
-            prev_slash_i = @intCast(i);
-        }
+fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
+    const first_token = tree.firstToken(type_index);
+    const last_token = tree.lastToken(type_index);
+    for (first_token..last_token + 1) |i| {
+        _ = try writer.print("{s}", .{Zoogle.tokenRender(tree, @intCast(i))});
     }
-    var slash_count: u32 = 0;
-    var slash_count_until_stop: u32 = 0;
-    for (abs_cwd, 0..) |c, i| {
-        if (c == '/') {
-            slash_count += 1;
-            if (i <= prev_slash_i) slash_count_until_stop += 1;
-        }
-    }
-    var step_backward: u32 = slash_count - slash_count_until_stop;
-    if (abs_cwd[abs_cwd.len - 1] != '/') step_backward += 1;
-    var buf = try allocator.alloc(u8, step_backward * 3 + path.len - prev_slash_i - 1);
-    for (0..step_backward) |i| {
-        _ = try std.fmt.bufPrint(buf[i * 3 ..], "../", .{});
-    }
-    _ = try std.fmt.bufPrint(buf[step_backward * 3 ..], "{s}", .{path[prev_slash_i + 1 ..]});
-    return buf;
 }
 
-var dist_limit: u32 = 20;
+
+fn PrintFn(writer: anytype, tree: Ast, fnProto: Ast.full.FnProto) !void {
+    if (fnProto.visib_token) |v| {
+        try writer.print("{s} ", .{Zoogle.tokenRender(tree, v)});
+    }
+    try writer.print("fn {s}(", .{Zoogle.tokenRender(tree, fnProto.name_token)});
+    var iterator = fnProto.iterate(&tree);
+    while (iterator.next()) |param| {
+        try writer.print("{s}: ", .{Zoogle.tokenRender(tree, param.name_token)});
+        try PrintExpr(writer, tree, param.type_expr);
+        if (iterator.param_i != fnProto.ast.params.len) try writer.print(", ", .{});
+    }
+    _ = try writer.write(") ");
+    if (fnProto.ast.callconv_expr != 0) {
+        _ = try writer.write("callconv(");
+        try PrintExpr(writer, tree, fnProto.ast.callconv_expr);
+        _ = try writer.write(") ");
+    }
+    try PrintExpr(writer, tree, fnProto.ast.return_type);
+    _ = try writer.write("\n");
+}
+
 var recursive_depth: u32 = 1;
 
 pub fn main() !void {
@@ -407,12 +123,12 @@ pub fn main() !void {
         } else return error.InvalidMatchSyntax;
     };
     if (match_fn.name_token) |nt| {
-        dist_limit += @intCast(tokenRender(match_ast, nt).len);
+        Zoogle.dist_limit += @intCast(Zoogle.tokenRender(match_ast, nt).len);
     }
     var match_param_it = match_fn.iterate(&match_ast);
     while (match_param_it.next()) |p| {
         if (p.name_token) |nt| {
-            dist_limit += @intCast(tokenRender(match_ast, nt).len);
+            Zoogle.dist_limit += @intCast(Zoogle.tokenRender(match_ast, nt).len);
         }
     }
     // try stdout.print("input: {s}\n", .{match_string});
@@ -435,16 +151,17 @@ pub fn main() !void {
     try bw.flush();
 
     try file_set.put(((try file.stat()).inode), {});
-    var fn_queue = FnQueue.init(allocator, null);
+    var fn_queue = Zoogle.FnQueue.init(allocator, null);
     defer fn_queue.deinit();
     try stdout.print("recursive depth: {}\n", .{recursive_depth});
-    try SearchFile(allocator, file, &fn_queue, &match_ast, match_fn, &path_fba, &file_set, recursive_depth);
-
+    var t = std.time.microTimestamp();
+    const ct = try Zoogle.SearchFile(allocator, file, &fn_queue, &match_ast, match_fn, &path_fba, &file_set, recursive_depth);
+    t = std.time.microTimestamp() - t;
     try stdout.print("opening {s}\n", .{file_name});
     defer file.close();
 
     // var buffer: [1]Ast.Node.Index = undefined;
-    try stdout.print("Find {} candidates\n", .{fn_queue.count()});
+    const found_ct = fn_queue.count();
     while (fn_queue.removeOrNull()) |fr| {
         try stdout.print("{s}{s}:{}:{}{s} {s}{s}{s}\n", .{ Color.KYEL, fr.location.file, fr.location.line, fr.location.column, Color.KRST, Color.KCYN, fr.fnString, Color.KRST });
         // const rel_path = RelativePathFromCwd(allocator, fr.)
@@ -452,9 +169,8 @@ pub fn main() !void {
         allocator.free(fr.location.file);
         allocator.destroy(fr);
     }
-    const fn_average: f64 = @as(f64, @floatFromInt(fn_time)) / @as(f64, @floatFromInt(fn_ct));
-    const type_average: f64 = @as(f64, @floatFromInt(type_time)) / @as(f64, @floatFromInt(type_ct));
-    try stdout.print("stats:\ntime: {}, #: {}, average: {:.3}. MatchType time: {}, #: {}, average: {:.3}\n", .{fn_time, fn_ct, fn_average, type_time, type_ct, type_average});
+    const average: f64 = @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(ct));
+    try stdout.print("stats:\nSearched through {} functions, found {}\nTotal time: {d:.3} ms\nAverage time: {d:.6} ms\n", .{ct, found_ct, @divFloor(t, 1000), @divExact(average, 1000)});
 
     // _ = token_tags;
     try bw.flush();
@@ -471,13 +187,13 @@ fn debugAst(ast: Ast) void {
     const debug = std.log.debug;
     debug("[{}]Nodes", .{ast.nodes.len});
     for (ast.nodes.items(.tag), 0..) |t, i| {
-        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, ast.nodes.items(.main_token)[i]) });
+        debug("[{}]: {} = \"{s}\"", .{ i, t, Zoogle.tokenRender(ast, ast.nodes.items(.main_token)[i]) });
     }
     // try stdout.print("token tags:\n", .{});
     debug("[{}]Tokens", .{ast.tokens.len});
     for (ast.tokens.items(.tag), 0..) |t, i| {
         if (t == .invalid) break;
-        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, @intCast(i)) });
+        debug("[{}]: {} = \"{s}\"", .{ i, t, Zoogle.tokenRender(ast, @intCast(i)) });
     }
 }
 const ta = std.testing.allocator;
@@ -497,13 +213,13 @@ test "Split" {
     var ast = try Ast.parse(ta, split_fn_str, .zig);
     defer ast.deinit(ta);
     var buf: Ast.Node.Index = undefined;
-    const fn_proto = try ParseFuncDecl(&ast, &buf);
+    const fn_proto = try Zoogle.ParseFuncDecl(&ast, &buf);
 
     const match_fn_str = "fn split(type, []const T, []const T) SplitIterator";
     var match_ast = try Ast.parse(ta, match_fn_str, .zig);
     defer match_ast.deinit(ta);
     var match_buf: Ast.Node.Index = undefined;
-    const match_fn_proto = try ParseFuncInline(&match_ast, &match_buf);
+    const match_fn_proto = try Zoogle.ParseFuncInline(&match_ast, &match_buf);
 
     std.debug.print("\n{}\n", .{fn_proto});
     debugAst(ast);
@@ -513,7 +229,7 @@ test "Split" {
     debugAst(match_ast);
     try PrintFn(stderr, match_ast, match_fn_proto);
     var t1 = std.time.microTimestamp();
-    const return_dist1 = FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
+    const return_dist1 = Zoogle.FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
     t1 = std.time.microTimestamp() - t1;
     std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds\n", .{ return_dist1, t1 });
 
