@@ -139,13 +139,13 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     defer type_time += (std.time.microTimestamp() - t);
     type_ct  += 1;
     const a_first = a_tree.tokens.items(.start)[a_tree.firstToken(a)];
-    const a_last = a_tree.tokens.items(.start)[a_tree.lastToken(a)];
+    const a_last = a_tree.tokens.items(.start)[a_tree.lastToken(a) + 1];
     const a_param = a_tree.source[a_first..a_last];
 
     const b_first = b_tree.tokens.items(.start)[b_tree.firstToken(b)];
-    const b_last = b_tree.tokens.items(.start)[b_tree.lastToken(b)];
+    const b_last = b_tree.tokens.items(.start)[b_tree.lastToken(b) + 1];
     const b_param = b_tree.source[b_first..b_last];
-
+    
     return LevenshteinDistance(allocator, a_param, b_param) catch std.math.maxInt(u32);
 }
 
