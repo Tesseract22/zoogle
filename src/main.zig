@@ -136,15 +136,17 @@ fn EqlTag(ctx: ?*anyopaque, a: TokenTag, b: TokenTag) bool {
 
 fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
     var t = std.time.microTimestamp();
+    defer type_time += (std.time.microTimestamp() - t);
     type_ct  += 1;
-    const a_type = a_tree.tokens.items(.tag)[a_tree.firstToken(a)..a_tree.lastToken(a)];
-    const b_type = b_tree.tokens.items(.tag)[b_tree.firstToken(b)..b_tree.lastToken(b)];
-    var d = LevenshteinDistanceOptions(TokenTag)(allocator, a_type, b_type, .{ .eql = EqlTag }) catch return std.math.maxInt(u32);
-    const a_param_name = tokenRender(a_tree.*, a_tree.lastToken(a));
-    const b_param_name = tokenRender(b_tree.*, b_tree.lastToken(b));
-    d += LevenshteinDistance(allocator, a_param_name, b_param_name) catch return std.math.maxInt(u32);
-    type_time += (std.time.microTimestamp() - t);
-    return d;
+    const a_first = a_tree.tokens.items(.start)[a_tree.firstToken(a)];
+    const a_last = a_tree.tokens.items(.start)[a_tree.lastToken(a)];
+    const a_param = a_tree.source[a_first..a_last];
+
+    const b_first = b_tree.tokens.items(.start)[b_tree.firstToken(b)];
+    const b_last = b_tree.tokens.items(.start)[b_tree.lastToken(b)];
+    const b_param = b_tree.source[b_first..b_last];
+
+    return LevenshteinDistance(allocator, a_param, b_param) catch std.math.maxInt(u32);
 }
 
 fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
