@@ -28,28 +28,9 @@ fn PrintUsage() void {
 
 
 
-fn StdLibrary(lib: []const u8) ![]const u8 {
-    if (std.mem.eql(u8, lib, "std")) {
-        return "lib/std/std.zig";
-    } else if (std.mem.eql(u8, lib, "builtin")) {
-        return "lib/std/builtin.zig";
-    }
-    return error.PacakageNotFound;
-}
 
-fn FindFromSysPath(allocator: std.mem.Allocator, file_name: []const u8) ![]const u8 {
-    const env_paths = std.os.getenv("PATH") orelse return error.PacakageNotFound;
-    var iterator = std.mem.splitScalar(u8, env_paths, ':');
-    while (iterator.next()) |env_path| {
-        std.log.debug("finding in {s}/{s}", .{ env_path, file_name });
-        var temp_dir = std.fs.openDirAbsolute(env_path, .{}) catch continue;
-        defer temp_dir.close();
-        const package = temp_dir.openFile(file_name, .{ .mode = .read_only }) catch continue;
-        defer package.close();
-        return try temp_dir.realpathAlloc(allocator, file_name);
-    }
-    return error.PacakageNotFound;
-}
+
+
 
 fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
     const first_token = tree.firstToken(type_index);
@@ -111,57 +92,9 @@ pub fn main() !void {
     const file_name = args[1];
     const match_string = args[2];
 
-    var match_ast = try Ast.parse(allocator, match_string, .zig);
-    defer match_ast.deinit(allocator);
-    // debugAst(match_ast);
-    var match_fn_node: [1]Ast.Node.Index = undefined;
-    const match_fn = eval_fn: {
-        break :eval_fn for (match_ast.nodes.items(.tag), 0..) |t, i| {
-            _ = t;
-            match_fn_node[0] = @intCast(i);
-            break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
-        } else return error.InvalidMatchSyntax;
-    };
-    if (match_fn.name_token) |nt| {
-        Zoogle.dist_limit += @intCast(Zoogle.tokenRender(match_ast, nt).len);
-    }
-    var match_param_it = match_fn.iterate(&match_ast);
-    while (match_param_it.next()) |p| {
-        if (p.name_token) |nt| {
-            Zoogle.dist_limit += @intCast(Zoogle.tokenRender(match_ast, nt).len);
-        }
-    }
-    // try stdout.print("input: {s}\n", .{match_string});
-    std.log.debug("fn node: {}", .{match_fn_node[0]});
-    try PrintFn(stdout, match_ast, match_fn);
-    var path_buffer = [_]u8{0} ** 1024;
-    var path_fba = std.heap.FixedBufferAllocator.init(&path_buffer);
-
-    var file_set = FileSet.init(allocator);
-    defer file_set.deinit();
-    var file = try find_file: {
-        if (!std.mem.endsWith(u8, file_name, ".zig")) {
-            const package_abs_path = try FindFromSysPath(path_fba.allocator(), try StdLibrary(file_name));
-            break :find_file std.fs.openFileAbsolute(package_abs_path, .{ .mode = .read_only });
-        }
-        _ = try std.fs.cwd().realpathAlloc(path_fba.allocator(), file_name);
-        break :find_file try std.fs.cwd().openFile(file_name, .{ .mode = .read_only });
-    };
-    try stdout.print("current path: {s}\n", .{path_buffer});
-    try bw.flush();
-
-    try file_set.put(((try file.stat()).inode), {});
-    var fn_queue = Zoogle.FnQueue.init(allocator, null);
+    var fn_queue = try Zoogle.Search(allocator, match_string, file_name, recursive_depth);
     defer fn_queue.deinit();
-    try stdout.print("recursive depth: {}\n", .{recursive_depth});
-    var t = std.time.microTimestamp();
-    const ct = try Zoogle.SearchFile(allocator, file, &fn_queue, &match_ast, match_fn, &path_fba, &file_set, recursive_depth);
-    t = std.time.microTimestamp() - t;
-    try stdout.print("opening {s}\n", .{file_name});
-    defer file.close();
-
     // var buffer: [1]Ast.Node.Index = undefined;
-    const found_ct = fn_queue.count();
     while (fn_queue.removeOrNull()) |fr| {
         try stdout.print("{s}{s}:{}:{}{s} {s}{s}{s}\n", .{ Color.KYEL, fr.location.file, fr.location.line, fr.location.column, Color.KRST, Color.KCYN, fr.fnString, Color.KRST });
         // const rel_path = RelativePathFromCwd(allocator, fr.)
@@ -169,13 +102,9 @@ pub fn main() !void {
         allocator.free(fr.location.file);
         allocator.destroy(fr);
     }
-    const average: f64 = @as(f64, @floatFromInt(t)) / @as(f64, @floatFromInt(ct));
-    try stdout.print("stats:\nSearched through {} functions, found {}\nTotal time: {d:.3} ms\nAverage time: {d:.6} ms\n", .{ct, found_ct, @divFloor(t, 1000), @divExact(average, 1000)});
 
-    // _ = token_tags;
     try bw.flush();
 
-    // debugAst(match_ast);
 
 }
 

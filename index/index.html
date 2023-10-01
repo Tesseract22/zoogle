@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+
+<html>
+    <head>
+        <title>Zoogle</title>
+    </head>
+    <body>
+        <input id="input"/>
+        <div id="table">
+
+        </div>
+        <script>
+            const input = document.getElementById("input")
+            const table = document.getElementById("table")
+            const load = 
+            input.oninput = (ev) => {
+                console.log("Sending " + input.value)
+                const request = new XMLHttpRequest();
+                request.addEventListener(
+                    "load", 
+                    (ev) => {
+                        table.innerHTML = ""
+                        const res = request.responseText
+                        const fs = res.split('\n')
+                        for (const f of fs) {
+                            const el = document.createElement("div")
+                            el.innerHTML = f
+                            table.appendChild(el)
+                        }
+                    }
+                )
+                request.open("POST", "search") 
+                request.send(input.value)
+            }
+
+        </script>
+    </body>
+</html>
