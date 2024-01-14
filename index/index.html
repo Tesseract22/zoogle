@@ -12,15 +12,17 @@
         <script>
             const input = document.getElementById("input")
             const table = document.getElementById("table")
+            let prevRequest = null
             const load = 
             input.oninput = (ev) => {
                 console.log("Sending " + input.value)
-                const request = new XMLHttpRequest();
-                request.addEventListener(
+                if (prevRequest !== null) prevRequest.abort()
+                prevRequest = new XMLHttpRequest();
+                prevRequest.addEventListener(
                     "load", 
                     (ev) => {
                         table.innerHTML = ""
-                        const res = request.responseText
+                        const res = prevRequest.responseText
                         const fs = res.split('\n')
                         for (const f of fs) {
                             const el = document.createElement("div")
@@ -29,8 +31,8 @@
                         }
                     }
                 )
-                request.open("POST", "search") 
-                request.send(input.value)
+                prevRequest.open("POST", "search") 
+                prevRequest.send(input.value)
             }
 
         </script>

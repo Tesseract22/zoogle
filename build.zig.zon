@@ -1,4 +1,5 @@
 .{
     .name = "zoogle",
     .version = "0.1.0",
+    .paths = .{"src", "build.zig", "README.md", "build.zig.zon"},
 }

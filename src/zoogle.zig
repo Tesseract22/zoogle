@@ -78,6 +78,7 @@ pub fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, mat
         var buffer: [1]Ast.Node.Index = undefined;
         var fn_proto = ast.fullFnProto(&buffer, d) orelse continue;
         const distance = FuzzyMatchFn(allocator, &ast, match_ast, fn_proto, match_fn);
+        std.log.debug("distance: {}, {}\n", .{distance, dist_limit});
         ct += 1;
         // std.log.debug("fn {s}() distance: {}", .{ tokenRender(ast, fn_proto.name_token), distance });
         if (distance > dist_limit) continue;
@@ -220,7 +221,7 @@ fn EqlTag(ctx: ?*anyopaque, a: TokenTag, b: TokenTag) bool {
     return a == b;
 }
 
-fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
+pub fn FuzzyMatchType2(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
     const a_first = a_tree.tokens.items(.start)[a_tree.firstToken(a)];
     
         
@@ -234,8 +235,11 @@ fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: A
     
     return LevenshteinDistance(allocator, a_param, b_param) catch std.math.maxInt(u32);
 }
-
-fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
+pub fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
+    var ctx = TokensContext.init(a_tree, b_tree, a, b, allocator);
+    return LevenshteinDistanceOptions(&ctx, allocator) catch 0;
+}
+pub fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
     var d: u32 = 0;
     const last_token = tree.lastToken(a);
     const a_type = tree.tokens.items(.tag)[tree.firstToken(a)..last_token];
@@ -244,7 +248,9 @@ fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
     return d;
 }
 
-fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
+
+
+pub fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
     var dist: u32 = 0;
     if (a.name_token != null and b.name_token != null) {
         dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
@@ -328,6 +334,7 @@ pub fn Search(allocator: std.mem.Allocator, s: []const u8, path: []const u8, dep
 
     const file_name = path;
     const match_string = try allocator.allocSentinel(u8, s.len, 0);
+    defer allocator.free(match_string);
     @memcpy(match_string, s);
     var dist_limit: u32 = 20;
 
@@ -376,3 +383,118 @@ pub fn Search(allocator: std.mem.Allocator, s: []const u8, path: []const u8, dep
 
 
 }
+
+const ta = std.testing.allocator;
+fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
+    const first_token = tree.firstToken(type_index);
+    const last_token = tree.lastToken(type_index);
+    for (first_token..last_token + 1) |i| {
+        _ = try writer.print("{s}", .{tokenRender(tree, @intCast(i))});
+    }
+}
+
+test "Split" {
+    const stderr = std.io.getStdErr().writer();
+    stderr.writeByte('\n') catch unreachable;
+    const split_fn_str =
+        \\pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) !u32 {
+        \\}
+    ;
+    // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
+    var ast = try Ast.parse(ta, split_fn_str, .zig);
+    defer ast.deinit(ta);
+    var buf: Ast.Node.Index = undefined;
+    const fn_proto = try ParseFuncDecl(&ast, &buf);
+
+    var ast2 = try Ast.parse(ta, "fn LevenshteinDistance(allocator, []const u8, []const u8) !u32'", .zig);
+    defer ast2.deinit(ta);
+    const fn_proto2 = try ParseFuncInline(&ast2, &buf);
+
+    // PrintFn(stderr, ast, fn_proto) catch unreachable;
+    // PrintFn(stderr, ast, fn_proto2) catch unreachable;
+    var iterator = fn_proto.iterate(&ast);
+    while (iterator.next()) |param| {
+        const type_node_index = param.type_expr;
+        const first = ast.firstToken(type_node_index);
+        stderr.print("first token: {s}|{}\n", .{ast.tokenSlice(first), ast.nodes.items(.tag)[type_node_index]}) catch unreachable;
+        var iterator2 = fn_proto2.iterate(&ast);
+        while (iterator2.next()) |param2| {
+            const type_node_index2 = param2.type_expr;
+
+            var ctx = TokensContext.init(&ast, &ast2, type_node_index, type_node_index2, ta);
+            const dist = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
+            
+            PrintExpr(stderr, ast, type_node_index) catch unreachable;
+            _ = stderr.write(" <=> ") catch unreachable;
+            PrintExpr(stderr, ast2, type_node_index2) catch unreachable;
+            stderr.print(": {}\n", .{dist}) catch unreachable;
+
+
+            
+        }
+    }
+
+    // const ta = std.heap.testAllocator(st)
+}
+
+const TokensContext = struct {
+    ast_s: *Ast,
+    ast_t: *Ast,
+    s_len: usize,
+    t_len: usize,
+    si: u32,
+    ti: u32,
+    t_init: u32,
+    allocator: std.mem.Allocator,
+    pub const zero = 0;
+    pub fn cost(self: TokensContext, s: Ast.TokenIndex, t: Ast.TokenIndex) u32 {
+        if (s == 0 and t == 0) unreachable;
+        const s_tag = self.ast_s.tokens.items(.tag)[s];
+        const t_tag = self.ast_t.tokens.items(.tag)[t];
+        if (s == 0) {
+            if (t_tag == .identifier) return @intCast(self.ast_t.tokenSlice(t).len);
+            return 1;
+        }
+        if (t == 0) {
+            if (s_tag == .identifier) return @intCast(self.ast_s.tokenSlice(s).len);
+            return 1;
+        }
+
+        if (s_tag == t_tag) {
+            if (s_tag == .identifier) {
+                return LevenshteinDistance(self.allocator, self.ast_s.tokenSlice(s), self.ast_t.tokenSlice(t)) catch unreachable;
+            }
+            return 0;
+        }
+        if (s_tag == .identifier) return @intCast(self.ast_s.tokenSlice(s).len);
+        if (t_tag == .identifier) return @intCast(self.ast_t.tokenSlice(t).len);
+        return 1;
+        
+    }
+    pub fn nextS(self: *TokensContext) Ast.TokenIndex {
+        defer self.si += 1;
+        return self.si;
+    }
+    pub fn nextT(self: *TokensContext) Ast.TokenIndex {
+        defer self.ti += 1;
+        return self.ti;
+    }
+    pub fn resetT(self: *TokensContext) void {
+        self.ti = self.t_init;
+    }
+    pub fn init(ast_s: *Ast, ast_t: *Ast, s: Ast.Node.Index, t: Ast.Node.Index, alloc: std.mem.Allocator) TokensContext {
+        return TokensContext {
+            .allocator = alloc, 
+            .ast_s = ast_s, .ast_t = ast_t, 
+            .s_len = IndexLen(ast_s, s),
+            .t_len = IndexLen(ast_t, t),
+            .si = ast_s.firstToken(s), .ti = ast_t.firstToken(t), .t_init = ast_t.firstToken(t),
+        };
+    }
+};
+
+pub fn IndexLen(ast: *Ast, i: Ast.Node.Index) usize {
+    if (i == 0) return 0;
+    return @intCast(ast.lastToken(i) - ast.firstToken(i) + 1);
+}
+

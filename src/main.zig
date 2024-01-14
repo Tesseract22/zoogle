@@ -102,7 +102,6 @@ pub fn main() !void {
         allocator.free(fr.location.file);
         allocator.destroy(fr);
     }
-
     try bw.flush();
 
 
@@ -144,23 +143,48 @@ test "Split" {
     var buf: Ast.Node.Index = undefined;
     const fn_proto = try Zoogle.ParseFuncDecl(&ast, &buf);
 
-    const match_fn_str = "fn split(type, []const T, []const T) SplitIterator";
-    var match_ast = try Ast.parse(ta, match_fn_str, .zig);
-    defer match_ast.deinit(ta);
-    var match_buf: Ast.Node.Index = undefined;
-    const match_fn_proto = try Zoogle.ParseFuncInline(&match_ast, &match_buf);
+    var ast2 = try Ast.parse(ta, "fn (comptime T: type) void", .zig);
+    defer ast2.deinit(ta);
+    const fn_proto2 = try Zoogle.ParseFuncInline(&ast2, &buf);
 
-    std.debug.print("\n{}\n", .{fn_proto});
-    debugAst(ast);
-    try PrintFn(stderr, ast, fn_proto);
-
-    std.debug.print("\n{}\n", .{match_fn_proto});
-    debugAst(match_ast);
-    try PrintFn(stderr, match_ast, match_fn_proto);
-    var t1 = std.time.microTimestamp();
-    const return_dist1 = Zoogle.FuzzyMatchType(ta, &match_ast, &ast, match_fn_proto.ast.return_type, fn_proto.ast.return_type);
-    t1 = std.time.microTimestamp() - t1;
-    std.debug.print("FuzzyMatchType(return_type) => {}, {} microseconds\n", .{ return_dist1, t1 });
-
+    PrintFn(stderr, ast, fn_proto) catch unreachable;
+    PrintFn(stderr, ast, fn_proto2) catch unreachable;
+    var iterator = fn_proto.iterate(&ast);
+    while (iterator.next()) |param| {
+        const type_node_index = param.type_expr;
+        const first_token = ast.firstToken(type_node_index);
+        const last_token = ast.lastToken(type_node_index);
+        stderr.print("param: \n", .{}) catch unreachable;
+        for (first_token..last_token+1) |token_i| {
+            const start = ast.tokens.items(.start)[token_i];
+            const end =ast.tokens.items(.start)[token_i+1];
+            stderr.print("token[{}]: {s} - {}\n", .{token_i, ast.source[start..end], ast.tokens.items(.tag)[token_i]}) catch unreachable;
+            
+        }
+    }
+    var iterator2 = fn_proto2.iterate(&ast);
+    while (iterator2.next()) |param| {
+        const type_node_index = param.type_expr;
+        const first_token = ast.firstToken(type_node_index);
+        const last_token = ast.lastToken(type_node_index);
+        stderr.print("param: \n", .{}) catch unreachable;
+        for (first_token..last_token+1) |token_i| {
+            stderr.print("token[{}]: {s} - {}\n", .{token_i, ast2.tokenSlice(@intCast(token_i)), ast.tokens.items(.tag)[token_i]}) catch unreachable;
+            
+        }
+    }
     // const ta = std.heap.testAllocator(st)
 }
+
+const Context = struct {
+    ast: *Ast,
+    const zero = 0;
+    pub fn cost(self: Context, s: Ast.TokenIndex, t: Ast.TokenIndex) u32 {
+        const tags = self.ast.tokens.items(.tag);
+        const s_tag = tags[s];
+        _ = s_tag;
+        const t_tag  = tags[t];
+        _ = t_tag;
+        
+    }
+};
