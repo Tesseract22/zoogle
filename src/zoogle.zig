@@ -397,18 +397,18 @@ test "Split" {
     const stderr = std.io.getStdErr().writer();
     stderr.writeByte('\n') catch unreachable;
     const split_fn_str =
-        \\pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) !u32 {
+        \\pub fn LevenshteinDistance(a: []u32) !u32 {
         \\}
     ;
     // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
     var ast = try Ast.parse(ta, split_fn_str, .zig);
     defer ast.deinit(ta);
-    var buf: Ast.Node.Index = undefined;
-    const fn_proto = try ParseFuncDecl(&ast, &buf);
+    var buf: [2]Ast.Node.Index = undefined;
+    const fn_proto = try ParseFuncDecl(&ast, &buf[0]);
 
-    var ast2 = try Ast.parse(ta, "fn LevenshteinDistance(allocator, []const u8, []const u8) !u32'", .zig);
+    var ast2 = try Ast.parse(ta, "fn LevenshteinDistance(u8)'", .zig);
     defer ast2.deinit(ta);
-    const fn_proto2 = try ParseFuncInline(&ast2, &buf);
+    const fn_proto2 = try ParseFuncInline(&ast2, &buf[1]);
 
     // PrintFn(stderr, ast, fn_proto) catch unreachable;
     // PrintFn(stderr, ast, fn_proto2) catch unreachable;
@@ -422,12 +422,13 @@ test "Split" {
             const type_node_index2 = param2.type_expr;
 
             var ctx = TokensContext.init(&ast, &ast2, type_node_index, type_node_index2, ta);
-            const dist = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
+            // const dist = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
             
             PrintExpr(stderr, ast, type_node_index) catch unreachable;
             _ = stderr.write(" <=> ") catch unreachable;
             PrintExpr(stderr, ast2, type_node_index2) catch unreachable;
-            stderr.print(": {}\n", .{dist}) catch unreachable;
+            stderr.print("  ", .{}) catch unreachable;
+            stderr.print(": {}\n", .{LevenshteinDistanceOptions(&ctx, ta) catch unreachable}) catch unreachable;
 
 
             
@@ -436,28 +437,73 @@ test "Split" {
 
     // const ta = std.heap.testAllocator(st)
 }
+test "type_dist" {
+    const Test = TestTypeMatch;
+    try Test("[]u8", "[]u8", 0);
+    try Test("hello", "hello", 0);
+    try Test("hello", "he", 3);
+    try Test("[4][]identifier", "[4][]identifier", 0);
+    try Test("[4][]hello", "[4][]he", 3);
+    try Test("[4]u32", "[]he", 4);
+    try Test("[4]u32", "?[]he", 5);
+    try Test("[4]u32", "err![]he", 5); // error union is ignored for now
+}
+fn println(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print(fmt++"\n", args);
+}
+fn debugAst(ast: Ast) void {
+    const debug = println;
+    debug("[{}]Nodes", .{ast.nodes.len});
+    for (ast.nodes.items(.tag), 0..) |t, i| {
+        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, ast.nodes.items(.main_token)[i]) });
+    }
+    // try stdout.print("token tags:\n", .{});
+    debug("[{}]Tokens", .{ast.tokens.len});
+    for (ast.tokens.items(.tag), 0..) |t, i| {
+        if (t == .invalid) break;
+        debug("[{}]: {} = \"{s}\"", .{ i, t, tokenRender(ast, @intCast(i)) });
+    }
+}
+fn TestTypeMatch(comptime s: [:0]const u8, comptime t: [:0]const u8, expect: usize) !void {
+    var ast_s = Ast.parse(ta, s, .zig) catch unreachable;
+    var ast_t = Ast.parse(ta, t, .zig) catch unreachable;
+    // debugAst(ast_s);
+    // debugAst(ast_t);
+    defer ast_s.deinit(ta);
+    defer ast_t.deinit(ta);
+    // this is a hack
+    var ctx = TokensContext.init(&ast_s, &ast_t, ast_s.rootDecls()[0]-1, ast_t.rootDecls()[0]-1, ta);
+    const d = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
+    if (d != expect) {
+        println("got {}, expected {}", .{d, expect});
+        unreachable;
+    }
+}
 
+const TokenIndex = Ast.TokenIndex;
 const TokensContext = struct {
     ast_s: *Ast,
     ast_t: *Ast,
-    s_len: usize,
-    t_len: usize,
-    si: u32,
-    ti: u32,
-    t_init: u32,
+    si: TokenIndex,
+    ti: TokenIndex,
+    s_start: TokenIndex,
+    t_start: TokenIndex,
+    s_end: TokenIndex,
+    t_end: TokenIndex,
     allocator: std.mem.Allocator,
     pub const zero = 0;
-    pub fn cost(self: TokensContext, s: Ast.TokenIndex, t: Ast.TokenIndex) u32 {
+    pub fn cost(self: TokensContext, s: TokenIndex, t: TokenIndex) usize {
+
         if (s == 0 and t == 0) unreachable;
         const s_tag = self.ast_s.tokens.items(.tag)[s];
         const t_tag = self.ast_t.tokens.items(.tag)[t];
+        const s_cost = if (s_tag == .identifier) self.ast_s.tokenSlice(s).len else 1;
+        const t_cost = if (t_tag == .identifier) self.ast_t.tokenSlice(t).len else 1;
         if (s == 0) {
-            if (t_tag == .identifier) return @intCast(self.ast_t.tokenSlice(t).len);
-            return 1;
+            return t_cost;
         }
         if (t == 0) {
-            if (s_tag == .identifier) return @intCast(self.ast_s.tokenSlice(s).len);
-            return 1;
+            return s_cost;
         }
 
         if (s_tag == t_tag) {
@@ -466,35 +512,39 @@ const TokensContext = struct {
             }
             return 0;
         }
-        if (s_tag == .identifier) return @intCast(self.ast_s.tokenSlice(s).len);
-        if (t_tag == .identifier) return @intCast(self.ast_t.tokenSlice(t).len);
+        if (s_tag == .identifier) return s_cost;
+        if (t_tag == .identifier) return t_cost;
         return 1;
         
+        
     }
-    pub fn nextS(self: *TokensContext) Ast.TokenIndex {
+    pub fn nextS(self: *TokensContext) ?Ast.TokenIndex {
+        if (self.si > self.s_end) return null;
         defer self.si += 1;
         return self.si;
     }
-    pub fn nextT(self: *TokensContext) Ast.TokenIndex {
+    pub fn nextT(self: *TokensContext) ?Ast.TokenIndex {
+        if (self.ti > self.t_end) return null;
         defer self.ti += 1;
         return self.ti;
     }
     pub fn resetT(self: *TokensContext) void {
         self.ti = self.t_init;
     }
+    pub fn resetS(self: *TokensContext) void {
+        self.si = self.s_init;
+    }
     pub fn init(ast_s: *Ast, ast_t: *Ast, s: Ast.Node.Index, t: Ast.Node.Index, alloc: std.mem.Allocator) TokensContext {
         return TokensContext {
             .allocator = alloc, 
             .ast_s = ast_s, .ast_t = ast_t, 
-            .s_len = IndexLen(ast_s, s),
-            .t_len = IndexLen(ast_t, t),
-            .si = ast_s.firstToken(s), .ti = ast_t.firstToken(t), .t_init = ast_t.firstToken(t),
+            .si = s, .ti = t, 
+            .s_start = s, .t_start = t,
+            .s_end = ast_s.lastToken(s), .t_end = ast_t.lastToken(t),
         };
     }
 };
 
-pub fn IndexLen(ast: *Ast, i: Ast.Node.Index) usize {
-    if (i == 0) return 0;
-    return @intCast(ast.lastToken(i) - ast.firstToken(i) + 1);
-}
+
+
 
