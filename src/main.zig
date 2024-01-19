@@ -62,9 +62,14 @@ fn PrintFn(writer: anytype, tree: Ast, fnProto: Ast.full.FnProto) !void {
     _ = try writer.write("\n");
 }
 
-var recursive_depth: u32 = 1;
 
+pub const std_options = struct {
+    pub const log_level: std.log.Level = .err;
+
+};
 pub fn main() !void {
+    var recursive_depth: u32 = 1;
+
     errdefer PrintUsage();
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -107,84 +112,4 @@ pub fn main() !void {
 
 }
 
-fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
 
-fn debugAst(ast: Ast) void {
-    const debug = std.log.debug;
-    debug("[{}]Nodes", .{ast.nodes.len});
-    for (ast.nodes.items(.tag), 0..) |t, i| {
-        debug("[{}]: {} = \"{s}\"", .{ i, t, Zoogle.tokenRender(ast, ast.nodes.items(.main_token)[i]) });
-    }
-    // try stdout.print("token tags:\n", .{});
-    debug("[{}]Tokens", .{ast.tokens.len});
-    for (ast.tokens.items(.tag), 0..) |t, i| {
-        if (t == .invalid) break;
-        debug("[{}]: {} = \"{s}\"", .{ i, t, Zoogle.tokenRender(ast, @intCast(i)) });
-    }
-}
-const ta = std.testing.allocator;
-
-test "Split" {
-    const stderr = std.io.getStdErr().writer();
-    const split_fn_str =
-        \\pub fn splitAny(comptime T: type, buffer: []const T, delimiters: []const T) SplitIterator(T, .any) {
-        \\  return .{
-        \\    .index = 0,
-        \\    .buffer = buffer,
-        \\    .delimiter = delimiters,
-        \\  };
-        \\}
-    ;
-    // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
-    var ast = try Ast.parse(ta, split_fn_str, .zig);
-    defer ast.deinit(ta);
-    var buf: Ast.Node.Index = undefined;
-    const fn_proto = try Zoogle.ParseFuncDecl(&ast, &buf);
-
-    var ast2 = try Ast.parse(ta, "fn (comptime T: type) void", .zig);
-    defer ast2.deinit(ta);
-    const fn_proto2 = try Zoogle.ParseFuncInline(&ast2, &buf);
-
-    PrintFn(stderr, ast, fn_proto) catch unreachable;
-    PrintFn(stderr, ast, fn_proto2) catch unreachable;
-    var iterator = fn_proto.iterate(&ast);
-    while (iterator.next()) |param| {
-        const type_node_index = param.type_expr;
-        const first_token = ast.firstToken(type_node_index);
-        const last_token = ast.lastToken(type_node_index);
-        stderr.print("param: \n", .{}) catch unreachable;
-        for (first_token..last_token+1) |token_i| {
-            const start = ast.tokens.items(.start)[token_i];
-            const end =ast.tokens.items(.start)[token_i+1];
-            stderr.print("token[{}]: {s} - {}\n", .{token_i, ast.source[start..end], ast.tokens.items(.tag)[token_i]}) catch unreachable;
-            
-        }
-    }
-    var iterator2 = fn_proto2.iterate(&ast);
-    while (iterator2.next()) |param| {
-        const type_node_index = param.type_expr;
-        const first_token = ast.firstToken(type_node_index);
-        const last_token = ast.lastToken(type_node_index);
-        stderr.print("param: \n", .{}) catch unreachable;
-        for (first_token..last_token+1) |token_i| {
-            stderr.print("token[{}]: {s} - {}\n", .{token_i, ast2.tokenSlice(@intCast(token_i)), ast.tokens.items(.tag)[token_i]}) catch unreachable;
-            
-        }
-    }
-    // const ta = std.heap.testAllocator(st)
-}
-
-const Context = struct {
-    ast: *Ast,
-    const zero = 0;
-    pub fn cost(self: Context, s: Ast.TokenIndex, t: Ast.TokenIndex) u32 {
-        const tags = self.ast.tokens.items(.tag);
-        const s_tag = tags[s];
-        _ = s_tag;
-        const t_tag  = tags[t];
-        _ = t_tag;
-        
-    }
-};

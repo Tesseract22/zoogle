@@ -1,22 +1,22 @@
 const std = @import("std");
 
-pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) !u32 {
+pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []const u8) !usize {
     const m = s.len;
     const n = t.len;
 
-    var v0 = try allocator.alloc(u32, n + 1);
-    var v1 = try allocator.alloc(u32, n + 1);
+    var v0 = try allocator.alloc(usize, n + 1);
+    var v1 = try allocator.alloc(usize, n + 1);
     defer allocator.free(v0);
     defer allocator.free(v1);
     for (0..n + 1) |i| {
         v0[i] = @intCast(i);
     }
     for (0..m) |i| {
-        v1[0] = @as(u32, @intCast(i)) + 1;
+        v1[0] = @as(usize, @intCast(i)) + 1;
         for (0..n) |j| {
             const deletionCost = v0[j + 1] + 1;
             const insertionCost = v1[j] + 1;
-            var substitutionCost: u32 = undefined;
+            var substitutionCost: usize = undefined;
             if (s[i] == t[j]) {
                 substitutionCost = v0[j];
             } else {
@@ -45,7 +45,6 @@ pub fn LevenshteinDistanceOptions(ctx: anytype, allocator: std.mem.Allocator) !u
         try v0.append(v0.getLast() + ctx.cost(C.zero, t));
     }
     _ = try v1.addManyAsSlice(v0.items.len);
-
     var delete_acc: usize = 0;
     var i: usize = 0;
     while (ctx.nextS()) |s|: (i += 1) {
@@ -55,9 +54,11 @@ pub fn LevenshteinDistanceOptions(ctx: anytype, allocator: std.mem.Allocator) !u
         var j: usize = 0;
         ctx.resetT();
         while (ctx.nextT()) |t|: (j += 1) {
+            // std.debug.print("{} {} {} {}", .{i, j, s, t});
             const deletionCost = v0.items[j + 1] + ctx.cost(C.zero, t);
             const insertionCost = v1.items[j] + ctx.cost(s, C.zero);
             const substitutionCost = v0.items[j] + ctx.cost(s, t);
+            // std.debug.print("{} {} {}\n", .{deletionCost, insertionCost, substitutionCost});
             v1.items[j + 1] = @min(deletionCost, @min(insertionCost, substitutionCost));
         }
         std.mem.swap(std.ArrayList(usize), &v1, &v0);
@@ -77,26 +78,30 @@ const Ctx = struct {
     t: []const u8,
     si: usize = 0,
     ti: usize = 0,
-    s_len: usize = 0,
-    t_len: usize = 0,
     pub fn cost(self: Ctx, s: u8, t: u8) u32 {
         _ = self;
         return @intFromBool(s != t);
     }
-    pub fn nextS(self: *Ctx) u8 {
+    pub fn nextS(self: *Ctx) ?u8 {
+        if (self.si >= self.s.len) return null;
         defer self.si += 1;
         return self.s[self.si];
     }
-    pub fn nextT(self: *Ctx) u8 {
+    pub fn nextT(self: *Ctx) ?u8 {
+        if (self.ti >= self.t.len) return null;
         defer self.ti += 1;
         return self.t[self.ti];
+    }
+
+    pub fn resetS(self: *Ctx) void {
+        self.si = 0;
     }
     pub fn resetT(self: *Ctx) void {
         self.ti = 0;
     }
 };
 fn TestDistanceOpt(s: []const u8, t: []const u8, expect: u32) !void {
-    var ctx = Ctx{.s = s, .t = t, .s_len = s.len, .t_len = t.len};
+    var ctx = Ctx{.s = s, .t = t};
     const d = try LevenshteinDistanceOptions(&ctx, std.testing.allocator);
     std.debug.print("({s: <15} => {s: >15}) => ({: <2} <=> {: >2})\n", .{ s, t, expect, d });
     try std.testing.expect(d == expect);
@@ -114,7 +119,7 @@ test "distance" {
 test "distance option" {
     std.debug.print("\n", .{});
     try TestDistanceOpt("sitting", "", 7);
-    try TestDistanceOpt("hello", "hello", 0);
+    try TestDistance("hello", "hello", 0);
     try TestDistanceOpt("hello", "hello world", 6);
     try TestDistanceOpt("hello", "hllo", 1);
     try TestDistanceOpt("asfl;asvma;sd", "asfa[od; m", 8);

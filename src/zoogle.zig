@@ -60,7 +60,7 @@ fn GetDirOfPath(file_path: []const u8) []const u8 {
     const last_slash_index = std.mem.lastIndexOfScalar(u8, file_path, '/') orelse return "."; // windows compatiblity?
     return file_path[0..last_slash_index];
 }
-pub fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, dir: *std.heap.FixedBufferAllocator, file_set: *FileSet, depth: u32, dist_limit: u32) !usize {
+pub fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, match_ast: *Ast, match_fn: Ast.full.FnProto, dir: *std.heap.FixedBufferAllocator, file_set: *FileSet, depth: u32, dist_limit: usize) !usize {
     const file_size = (file.stat() catch |e| {
         std.log.err("Cannot get file size", .{});
         return e;
@@ -69,19 +69,19 @@ pub fn SearchFile(allocator: std.mem.Allocator, file: File, queue: *FnQueue, mat
         std.log.err("failed to allocate {} bytes to read file\n", .{file_size});
         return e;
     };
-    var ct: usize = 0;
     defer allocator.free(source);
     _ = try file.readAll(source);
     var ast = try Ast.parse(allocator, source, .zig);
     defer ast.deinit(allocator);
+    var ct: usize = 0;
     for (ast.rootDecls()) |d| {
         var buffer: [1]Ast.Node.Index = undefined;
         var fn_proto = ast.fullFnProto(&buffer, d) orelse continue;
         const distance = FuzzyMatchFn(allocator, &ast, match_ast, fn_proto, match_fn);
-        std.log.debug("distance: {}, {}\n", .{distance, dist_limit});
+        std.log.debug("distance {s}: {}, {}\n", .{ast.tokenSlice(fn_proto.name_token.?), distance, dist_limit});
         ct += 1;
         // std.log.debug("fn {s}() distance: {}", .{ tokenRender(ast, fn_proto.name_token), distance });
-        if (distance > dist_limit) continue;
+        if (@as(f32, @floatFromInt(distance)) > 0.75 * @as(f32, @floatFromInt(dist_limit))) continue;
         const fn_result = try allocator.create(FnResult);
         const location = ast.tokenLocation(0, fn_proto.ast.fn_token);
         fn_result.* = .{ .fnString = try FormatFn(allocator, ast, fn_proto), .distance = distance, .location = .{ .file = try RelativePathFromCwd(allocator, dir.buffer[0..dir.end_index]), .line = location.line, .column = location.column } };
@@ -235,49 +235,65 @@ pub fn FuzzyMatchType2(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast,
     
     return LevenshteinDistance(allocator, a_param, b_param) catch std.math.maxInt(u32);
 }
-pub fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.Node.Index, b: Ast.Node.Index) u32 {
+pub fn FuzzyMatchType(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Tokens, b: Tokens) usize {
+
     var ctx = TokensContext.init(a_tree, b_tree, a, b, allocator);
     return LevenshteinDistanceOptions(&ctx, allocator) catch 0;
 }
-pub fn FuzzyCostType(tree: Ast, a: Ast.Node.Index) u32 {
-    var d: u32 = 0;
-    const last_token = tree.lastToken(a);
-    const a_type = tree.tokens.items(.tag)[tree.firstToken(a)..last_token];
-    d += @intCast(a_type.len);
-    d += @intCast(tokenRender(tree, last_token).len);
+pub fn FuzzyCostType(tree: Ast, a: Tokens) usize {
+    var d: usize = 0;
+    for (a.start..a.end) |t| {
+        if (tree.tokens.items(.tag)[t] == .identifier) {
+            const start = tree.tokens.items(.start)[t];
+            const end = tree.tokens.items(.start)[t+1];
+            d += end-start;
+        } else {
+            d += 1;
+        }
+    }
     return d;
 }
 
 
 
-pub fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) u32 {
-    var dist: u32 = 0;
-    if (a.name_token != null and b.name_token != null) {
-        dist += (LevenshteinDistance(allocator, tokenRender(a_tree.*, a.name_token), tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32));
-    }
-    dist += FuzzyMatchType(allocator, a_tree, b_tree, a.ast.return_type, b.ast.return_type);
+pub fn FuzzyMatchFn(allocator: std.mem.Allocator, a_tree: *Ast, b_tree: *Ast, a: Ast.full.FnProto, b: Ast.full.FnProto) usize {
+    var dist: usize = 0;
+    dist += FuzzyMatchType(allocator, a_tree, b_tree, 
+        Tokens.init(a_tree.*, a.ast.return_type), 
+        Tokens.init(b_tree.*, b.ast.return_type));
     // std.log.debug("return dist: {}", .{dist});
     var ai = a.iterate(a_tree);
     var bi = b.iterate(b_tree);
-    while (true) {
-        const ap = ai.next();
-        const bp = bi.next();
-        if (ap == null and bp == null) {
-            break;
-        } else if (ap == null) {
-            dist += FuzzyCostType(b_tree.*, bp.?.type_expr) * 2;
-        } else if (bp == null) {
-            dist += FuzzyCostType(a_tree.*, ap.?.type_expr) * 2;
-        } else {
-            const a_name = tokenRender(a_tree.*, ap.?.name_token);
-            const b_name = tokenRender(b_tree.*, bp.?.name_token);
-            dist += (LevenshteinDistance(allocator, a_name, b_name) catch return std.math.maxInt(u32));
-            dist += FuzzyMatchType(allocator, a_tree, b_tree, ap.?.type_expr, bp.?.type_expr);
-        }
-        // std.log.debug("param dist: {}", .{dist});
-
+    const ParamQueue = std.PriorityQueue(Tokens, SortContext, lessThan);
+    var a_params = ParamQueue.init(allocator, a_tree);
+    var b_params = ParamQueue.init(allocator, b_tree);
+    defer {
+        a_params.deinit();
+        b_params.deinit();
     }
-
+    while (ai.next()) |ap| {
+        a_params.add(Tokens.init(a_tree.*, ap.type_expr)) catch unreachable;
+    }
+    while (bi.next()) |bp| {
+        b_params.add(Tokens.init(b_tree.*, bp.type_expr)) catch unreachable;
+    }
+    const len = @min(a_params.count(), b_params.count());
+    for (a_params.items[0..len], b_params.items[0..len]) |ap, bp| {
+        // std.log.debug("ap: {}, bp: {}\n", .{ap, bp});
+        var ctx = TokensContext.init(a_tree, b_tree, ap, bp, allocator);
+        dist += LevenshteinDistanceOptions(&ctx, allocator) catch std.math.maxInt(usize);
+    }
+    const more, const tree = if (a_params.len > b_params.len) 
+        .{a_params.items[len..a_params.count()], a_tree} else 
+        .{b_params.items[len..b_params.count()], b_tree};
+    for (more) |m| {
+        dist += FuzzyCostType(tree.*, m);
+    }
+    if (a.name_token != null and b.name_token != null) {
+        dist += LevenshteinDistance(allocator, 
+                    tokenRender(a_tree.*, a.name_token), 
+                    tokenRender(b_tree.*, b.name_token)) catch return std.math.maxInt(u32);
+    }
     return dist;
 }
 
@@ -293,7 +309,7 @@ const ParseError = error{
 pub const FnQueue = std.PriorityQueue(*FnResult, ?*anyopaque, FnResult.compare);
 const FnResult = struct {
     fnString: []const u8,
-    distance: u32,
+    distance: usize,
     location: struct {
         file: []const u8,
         line: usize,
@@ -330,38 +346,30 @@ fn StdLibrary(lib: []const u8) ![]const u8 {
 }
 
 
-pub fn Search(allocator: std.mem.Allocator, s: []const u8, path: []const u8, depth: u32) !FnQueue {
+pub fn Search(allocator: std.mem.Allocator, match_string: [:0]const u8, path: []const u8, depth: u32) !FnQueue {
 
     const file_name = path;
-    const match_string = try allocator.allocSentinel(u8, s.len, 0);
-    defer allocator.free(match_string);
-    @memcpy(match_string, s);
-    var dist_limit: u32 = 20;
 
     var match_ast = try Ast.parse(allocator, match_string, .zig);
     defer match_ast.deinit(allocator);
-    // debugAst(match_ast);
     var match_fn_node: [1]Ast.Node.Index = undefined;
-    const match_fn = eval_fn: {
-        break :eval_fn for (match_ast.nodes.items(.tag), 0..) |t, i| {
-            _ = t;
-            match_fn_node[0] = @intCast(i);
-            break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
-        } else return error.InvalidMatchSyntax;
-    };
-    if (match_fn.name_token) |nt| {
-        dist_limit += @intCast(tokenRender(match_ast, nt).len);
+    const match_fn = for (match_ast.nodes.items(.tag), 0..) |_, i| {
+        match_fn_node[0] = @intCast(i);
+        break match_ast.fullFnProto(&match_fn_node, @intCast(i)) orelse continue;
+    } else return error.InvalidMatchSyntax;
+    var param_it = match_fn.iterate(&match_ast);
+    var dist_limit: usize = 0;
+    // set up dist_limit
+    while (param_it.next()) |p| {   
+        dist_limit += FuzzyCostType(match_ast, Tokens.init(match_ast, p.type_expr));
     }
-    var match_param_it = match_fn.iterate(&match_ast);
-    while (match_param_it.next()) |p| {
-        if (p.name_token) |nt| {
-            dist_limit += @intCast(tokenRender(match_ast, nt).len);
-        }
-    }
-    // try stdout.print("input: {s}\n", .{match_string});
+    dist_limit += FuzzyCostType(match_ast, Tokens.init(match_ast, match_fn.ast.return_type));
+    if (match_fn.name_token) |nk| dist_limit += match_ast.tokenSlice(match_ast.nodes.items(.main_token)[nk]).len;
+    
     var path_buffer = [_]u8{0} ** 1024;
     var path_fba = std.heap.FixedBufferAllocator.init(&path_buffer);
 
+    // the set of files to search recursively for
     var file_set = FileSet.init(allocator);
     defer file_set.deinit();
     var file = try find_file: {
@@ -385,58 +393,8 @@ pub fn Search(allocator: std.mem.Allocator, s: []const u8, path: []const u8, dep
 }
 
 const ta = std.testing.allocator;
-fn PrintExpr(writer: anytype, tree: Ast, type_index: Ast.Node.Index) !void {
-    const first_token = tree.firstToken(type_index);
-    const last_token = tree.lastToken(type_index);
-    for (first_token..last_token + 1) |i| {
-        _ = try writer.print("{s}", .{tokenRender(tree, @intCast(i))});
-    }
-}
-
-test "Split" {
-    const stderr = std.io.getStdErr().writer();
-    stderr.writeByte('\n') catch unreachable;
-    const split_fn_str =
-        \\pub fn LevenshteinDistance(a: []u32) !u32 {
-        \\}
-    ;
-    // std.debug.print("\nTesting: {s}\n", .{split_fn_str});
-    var ast = try Ast.parse(ta, split_fn_str, .zig);
-    defer ast.deinit(ta);
-    var buf: [2]Ast.Node.Index = undefined;
-    const fn_proto = try ParseFuncDecl(&ast, &buf[0]);
-
-    var ast2 = try Ast.parse(ta, "fn LevenshteinDistance(u8)'", .zig);
-    defer ast2.deinit(ta);
-    const fn_proto2 = try ParseFuncInline(&ast2, &buf[1]);
-
-    // PrintFn(stderr, ast, fn_proto) catch unreachable;
-    // PrintFn(stderr, ast, fn_proto2) catch unreachable;
-    var iterator = fn_proto.iterate(&ast);
-    while (iterator.next()) |param| {
-        const type_node_index = param.type_expr;
-        const first = ast.firstToken(type_node_index);
-        stderr.print("first token: {s}|{}\n", .{ast.tokenSlice(first), ast.nodes.items(.tag)[type_node_index]}) catch unreachable;
-        var iterator2 = fn_proto2.iterate(&ast);
-        while (iterator2.next()) |param2| {
-            const type_node_index2 = param2.type_expr;
-
-            var ctx = TokensContext.init(&ast, &ast2, type_node_index, type_node_index2, ta);
-            // const dist = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
-            
-            PrintExpr(stderr, ast, type_node_index) catch unreachable;
-            _ = stderr.write(" <=> ") catch unreachable;
-            PrintExpr(stderr, ast2, type_node_index2) catch unreachable;
-            stderr.print("  ", .{}) catch unreachable;
-            stderr.print(": {}\n", .{LevenshteinDistanceOptions(&ctx, ta) catch unreachable}) catch unreachable;
 
 
-            
-        }
-    }
-
-    // const ta = std.heap.testAllocator(st)
-}
 test "type_dist" {
     const Test = TestTypeMatch;
     try Test("[]u8", "[]u8", 0);
@@ -446,7 +404,37 @@ test "type_dist" {
     try Test("[4][]hello", "[4][]he", 3);
     try Test("[4]u32", "[]he", 4);
     try Test("[4]u32", "?[]he", 5);
-    try Test("[4]u32", "err![]he", 5); // error union is ignored for now
+}
+
+
+const SortContext = *Ast;
+
+const Tokens = struct {
+    start: TokenIndex, // inclusive
+    end: TokenIndex, // not inclusive
+    pub fn len(self: Tokens) u32 {
+        return self.end - self.start;
+    }
+    pub fn shift(self: Tokens) Tokens {
+        return .{ .start = self.start + 1, .end = self.end };
+    }
+    pub fn init(ast: Ast, i: Ast.Node.Index) Tokens {
+        return .{ .start = ast.firstToken(i), .end = ast.lastToken(i)+1 };
+    }
+};
+
+fn lessThan(ctx: SortContext, lhs: Tokens, rhs: Tokens) std.math.Order {
+    
+    return lessThanTokens(ctx, lhs, rhs);
+}
+fn lessThanTokens(ast: SortContext, lhs: Tokens, rhs: Tokens) std.math.Order {
+    if (lhs.len() == 0) return .lt;
+    if (rhs.len() == 0) return .gt;
+    const ltag = @intFromEnum(ast.tokens.items(.tag)[lhs.start]);
+    const rtag = @intFromEnum(ast.tokens.items(.tag)[rhs.start]);
+    if (ltag < rtag) return .lt;
+    if (ltag > rtag) return .gt;
+    return lessThanTokens(ast, lhs.shift(), rhs.shift());
 }
 fn println(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt++"\n", args);
@@ -472,10 +460,12 @@ fn TestTypeMatch(comptime s: [:0]const u8, comptime t: [:0]const u8, expect: usi
     defer ast_s.deinit(ta);
     defer ast_t.deinit(ta);
     // this is a hack
-    var ctx = TokensContext.init(&ast_s, &ast_t, ast_s.rootDecls()[0]-1, ast_t.rootDecls()[0]-1, ta);
+    const si = ast_s.nodes.items(.main_token)[ast_s.rootDecls()[0]-1];
+    const ti = ast_t.nodes.items(.main_token)[ast_t.rootDecls()[0]-1];
+    var ctx = TokensContext.init(&ast_s, &ast_t, si, ti, ta);
     const d = LevenshteinDistanceOptions(&ctx, ta) catch unreachable;
     if (d != expect) {
-        println("got {}, expected {}", .{d, expect});
+        println("'{s}' <=> '{s}': got {}, expected {}", .{s, t, d, expect});
         unreachable;
     }
 }
@@ -491,21 +481,22 @@ const TokensContext = struct {
     s_end: TokenIndex,
     t_end: TokenIndex,
     allocator: std.mem.Allocator,
-    pub const zero = 0;
+    pub const zero = std.math.maxInt(TokenIndex);
     pub fn cost(self: TokensContext, s: TokenIndex, t: TokenIndex) usize {
 
-        if (s == 0 and t == 0) unreachable;
+        if (s == zero and t == zero) unreachable;
+
+
+        if (s == zero) {
+            return if (self.ast_t.tokens.items(.tag)[t] == .identifier) self.ast_t.tokenSlice(t).len else 1;
+        }
+        if (t == zero) {
+            return if (self.ast_s.tokens.items(.tag)[s] == .identifier) self.ast_s.tokenSlice(s).len else 1;
+        }
         const s_tag = self.ast_s.tokens.items(.tag)[s];
         const t_tag = self.ast_t.tokens.items(.tag)[t];
         const s_cost = if (s_tag == .identifier) self.ast_s.tokenSlice(s).len else 1;
         const t_cost = if (t_tag == .identifier) self.ast_t.tokenSlice(t).len else 1;
-        if (s == 0) {
-            return t_cost;
-        }
-        if (t == 0) {
-            return s_cost;
-        }
-
         if (s_tag == t_tag) {
             if (s_tag == .identifier) {
                 return LevenshteinDistance(self.allocator, self.ast_s.tokenSlice(s), self.ast_t.tokenSlice(t)) catch unreachable;
@@ -519,12 +510,12 @@ const TokensContext = struct {
         
     }
     pub fn nextS(self: *TokensContext) ?Ast.TokenIndex {
-        if (self.si > self.s_end) return null;
+        if (self.si >= self.s_end) return null;
         defer self.si += 1;
         return self.si;
     }
     pub fn nextT(self: *TokensContext) ?Ast.TokenIndex {
-        if (self.ti > self.t_end) return null;
+        if (self.ti >= self.t_end) return null;
         defer self.ti += 1;
         return self.ti;
     }
@@ -534,16 +525,17 @@ const TokensContext = struct {
     pub fn resetT(self: *TokensContext) void {
         self.ti = self.t_start;
     }
-    pub fn init(ast_s: *Ast, ast_t: *Ast, s: Ast.Node.Index, t: Ast.Node.Index, alloc: std.mem.Allocator) TokensContext {
+    pub fn init(ast_s: *Ast, ast_t: *Ast, s: Tokens, t: Tokens, alloc: std.mem.Allocator) TokensContext {
         return TokensContext {
             .allocator = alloc, 
             .ast_s = ast_s, .ast_t = ast_t, 
-            .si = s, .ti = t, 
-            .s_start = s, .t_start = t,
-            .s_end = ast_s.lastToken(s), .t_end = ast_t.lastToken(t),
+            .si = s.start, .ti = t.start, 
+            .s_start = s.start, .t_start = t.start,
+            .s_end = s.end, .t_end = t.end,
         };
     }
 };
+
 
 
 
