@@ -528,11 +528,11 @@ const TokensContext = struct {
         defer self.ti += 1;
         return self.ti;
     }
-    pub fn resetT(self: *TokensContext) void {
-        self.ti = self.t_init;
-    }
     pub fn resetS(self: *TokensContext) void {
-        self.si = self.s_init;
+        self.si = self.s_start;
+    }
+    pub fn resetT(self: *TokensContext) void {
+        self.ti = self.t_start;
     }
     pub fn init(ast_s: *Ast, ast_t: *Ast, s: Ast.Node.Index, t: Ast.Node.Index, alloc: std.mem.Allocator) TokensContext {
         return TokensContext {

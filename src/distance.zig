@@ -33,46 +33,37 @@ pub fn LevenshteinDistance(allocator: std.mem.Allocator, s: []const u8, t: []con
 }
 
 
-pub fn LevenshteinDistanceOptions(ctx: anytype, allocator: std.mem.Allocator) !u32 {
-    const m = ctx.s_len;
-    const n = ctx.t_len;
+pub fn LevenshteinDistanceOptions(ctx: anytype, allocator: std.mem.Allocator) !usize {
     const C = @TypeOf(ctx.*);
-    var v0 = try allocator.alloc(u32, n + 1);
-    var v1 = try allocator.alloc(u32, n + 1);
-    defer allocator.free(v0);
-    defer allocator.free(v1);
-    v0[0] = 0;
-    var delete_acc: u32 = 0;
-    // that distance is the number of characters to append to  s to make t.
-    for (1..n + 1) |i| {
-        v0[i] = v0[i-1] + ctx.cost(C.zero, ctx.nextT());
+    var v0 = std.ArrayList(usize).init(allocator);
+    var v1 = std.ArrayList(usize).init(allocator);
+    defer v0.deinit();
+    defer v1.deinit();
+
+    try v0.append(0);
+    while (ctx.nextT()) |t| {
+        try v0.append(v0.getLast() + ctx.cost(C.zero, t));
     }
-    // std.debug.print("m: {}, n: {}\n", .{m, n});
-    // std.debug.print("vo start: {any}\n", .{v0});
-    ctx.resetT();
-    for (0..m) |i| {
-        _ = i;
+    _ = try v1.addManyAsSlice(v0.items.len);
+
+    var delete_acc: usize = 0;
+    var i: usize = 0;
+    while (ctx.nextS()) |s|: (i += 1) {
         // edit distance is delete (i + 1) chars from s to match empty t
-        const s = ctx.nextS();
         delete_acc += ctx.cost(s, C.zero);
-        v1[0] = delete_acc;
-        // std.debug.print("i={}, v1: {any}\n", .{i, v0});
-        for (0..n) |j| {
-            const t = ctx.nextT();
-            // std.debug.print("s[{}]={s}, t[{}]={s}\n", .{s,ctx.ast_s.tokenSlice(s),t,ctx.ast_t.tokenSlice(t)});
-            const deletionCost = v0[j + 1] + ctx.cost(C.zero, t);
-            const insertionCost = v1[j] + ctx.cost(s, C.zero);
-            const substitutionCost = v0[j] + ctx.cost(s, t);
-            // std.debug.print("({}, {}, {})\n", .{deletionCost, insertionCost, substitutionCost});
-            v1[j + 1] = @min(deletionCost, @min(insertionCost, substitutionCost));
-        }
+        v1.items[0] = delete_acc;
+        var j: usize = 0;
         ctx.resetT();
-        var tmp = v0;
-        v0 = v1;
-        v1 = tmp;
+        while (ctx.nextT()) |t|: (j += 1) {
+            const deletionCost = v0.items[j + 1] + ctx.cost(C.zero, t);
+            const insertionCost = v1.items[j] + ctx.cost(s, C.zero);
+            const substitutionCost = v0.items[j] + ctx.cost(s, t);
+            v1.items[j + 1] = @min(deletionCost, @min(insertionCost, substitutionCost));
+        }
+        std.mem.swap(std.ArrayList(usize), &v1, &v0);
         // swap
     }
-    return v0[n];
+    return v0.getLast();
 }
 
 fn TestDistance(s: []const u8, t: []const u8, expect: u32) !void {
