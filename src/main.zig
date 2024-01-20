@@ -23,7 +23,7 @@ var type_ct: usize = 0;
 fn PrintUsage() void {
     std.debug.print("zoogle $path_to_file $search_string [-r $recursive_depth]\n", .{});
     std.debug.print("{s: >8} path_to_file = {{\"std\" | relative_path}}\n", .{"where"});
-    std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name]: $var_type, ...) $var_type\"\n", .{"where"});
+    std.debug.print("{s: >8} search_string = \"fn [$fn_name]([$var_name:] $var_type, ...) $var_type\"\n", .{"where"});
 }
 
 
